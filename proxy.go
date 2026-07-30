@@ -53,6 +53,17 @@ func initProxyClient() {
 		os.Getenv("all_proxy"),
 	)
 
+	proxyMu.Lock()
+	defer proxyMu.Unlock()
+	for _, client := range proxyPool {
+		if t, ok := client.Transport.(*http.Transport); ok {
+			t.CloseIdleConnections()
+		}
+	}
+	proxyPool = nil
+	proxyLabels = nil
+	proxyIdx = 0
+
 	if proxyURL == "" {
 		proxyPool = []*http.Client{{Transport: streamingTransport()}}
 		proxyLabels = []string{"direct"}
@@ -79,14 +90,23 @@ func initProxyClient() {
 
 // proxyClientFn returns a round-robin proxy client from the pool.
 func proxyClientFn() *http.Client {
+	proxyMu.Lock()
+	defer proxyMu.Unlock()
 	if len(proxyPool) == 0 {
 		return &http.Client{Transport: streamingTransport()}
 	}
-	proxyMu.Lock()
 	client := proxyPool[proxyIdx%len(proxyPool)]
 	proxyIdx++
-	proxyMu.Unlock()
 	return client
+}
+
+func proxyCount() int {
+	proxyMu.Lock()
+	defer proxyMu.Unlock()
+	if len(proxyPool) == 0 {
+		return 1
+	}
+	return len(proxyPool)
 }
 
 func buildSingleProxyClient(proxyURL string) (*http.Client, string) {

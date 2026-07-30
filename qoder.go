@@ -606,7 +606,7 @@ func callQoder(ctx context.Context, pat, modelKey string, messages []ChatMessage
 	}
 
 	var resp *http.Response
-	proxyRetries := len(proxyPool)
+	proxyRetries := proxyCount()
 	if proxyRetries < 1 {
 		proxyRetries = 1
 	}
@@ -614,9 +614,20 @@ func callQoder(ctx context.Context, pat, modelKey string, messages []ChatMessage
 		proxyRetries = 3
 	}
 	for attempt := 0; attempt < proxyRetries; attempt++ {
-		resp, err = proxyClientFn().Do(req)
+		// Each attempt needs a fresh body; http.Client.Do consumes req.Body.
+		attemptReq := req.Clone(ctx)
+		if req.GetBody != nil {
+			attemptReq.Body, err = req.GetBody()
+			if err != nil {
+				return nil, fmt.Errorf("reset request body: %w", err)
+			}
+		}
+		resp, err = proxyClientFn().Do(attemptReq)
 		if err == nil {
 			break
+		}
+		if resp != nil && resp.Body != nil {
+			resp.Body.Close()
 		}
 		if attempt+1 < proxyRetries {
 			log.Printf("proxy retry %d/%d: %v", attempt+1, proxyRetries, err)
@@ -646,9 +657,10 @@ func callQoder(ctx context.Context, pat, modelKey string, messages []ChatMessage
 // {statusCodeValue, body} envelope and returns the concatenated text.
 func unwrapQoderSSE(body io.Reader, onChunk StreamCallback) (string, error) {
 	var full strings.Builder
+	sawDone := false
 	scanner := bufio.NewScanner(body)
-	// ponytail: 64KB buffer for large chunks
-	scanner.Buffer(make([]byte, 64*1024), 64*1024)
+	// Tool calls and long structured chunks may exceed Scanner's 64 KiB default.
+	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
@@ -660,6 +672,7 @@ func unwrapQoderSSE(body io.Reader, onChunk StreamCallback) (string, error) {
 			continue // keep-alive, not end-of-stream
 		}
 		if data == "[DONE]" {
+			sawDone = true
 			break
 		}
 
@@ -681,6 +694,7 @@ func unwrapQoderSSE(body io.Reader, onChunk StreamCallback) (string, error) {
 			continue // empty body = no-op chunk (keep-alive/metadata), not end
 		}
 		if inner == "[DONE]" {
+			sawDone = true
 			break
 		}
 
@@ -714,6 +728,9 @@ func unwrapQoderSSE(body io.Reader, onChunk StreamCallback) (string, error) {
 
 	if err := scanner.Err(); err != nil {
 		return full.String(), err
+	}
+	if !sawDone {
+		return full.String(), fmt.Errorf("qoder stream ended before [DONE]")
 	}
 
 	return full.String(), nil

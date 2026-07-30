@@ -127,7 +127,44 @@ func (p *PATPool) All() []string {
 	return out
 }
 
-func (p *PATPool) Len() int { return len(p.pats) }
+// NextAvoid selects according to strategy without repeating a PAT in one retry cycle.
+func (p *PATPool) NextAvoid(used map[string]bool) string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.pats) == 0 {
+		return ""
+	}
+	if p.strategy == "random" {
+		candidates := make([]int, 0, len(p.pats))
+		for i, pat := range p.pats {
+			if !used[pat] {
+				candidates = append(candidates, i)
+			}
+		}
+		if len(candidates) == 0 {
+			return ""
+		}
+		n, err := rand.Int(rand.Reader, big.NewInt(int64(len(candidates))))
+		if err != nil {
+			return p.pats[candidates[0]]
+		}
+		return p.pats[candidates[n.Int64()]]
+	}
+	for i := 0; i < len(p.pats); i++ {
+		pat := p.pats[p.idx%len(p.pats)]
+		p.idx++
+		if !used[pat] {
+			return pat
+		}
+	}
+	return ""
+}
+
+func (p *PATPool) Len() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.pats)
+}
 
 // ── OpenAI types ────────────────────────────────────────────────────────────
 
@@ -442,6 +479,9 @@ func handleComboNonStream(w http.ResponseWriter, r *http.Request, req ChatReques
 			}
 			lastErr = err
 			log.Printf("combo %q: qd/%s failed: %v", comboName, modelKey, err)
+			if isPricingError(err) {
+				log.Printf("combo %q: qd/%s PAT quota exhausted (code 112), PAT rotated", comboName, modelKey)
+			}
 		}
 		if round+1 < maxRounds {
 			log.Printf("combo %q: round %d complete, all models failed, starting round %d", comboName, round+1, round+2)
@@ -462,6 +502,7 @@ func handleComboStream(w http.ResponseWriter, r *http.Request, req ChatRequest, 
 	const maxRounds = 3
 	var lastErr error
 	roleSent := false
+comboRounds:
 	for round := 0; round < maxRounds; round++ {
 		for _, model := range modelList {
 			modelKey := resolveModelKey(model)
@@ -505,6 +546,13 @@ func handleComboStream(w http.ResponseWriter, r *http.Request, req ChatRequest, 
 			}
 			lastErr = err
 			log.Printf("combo %q: qd/%s failed: %v", comboName, modelKey, err)
+			if isPricingError(err) {
+				log.Printf("combo %q: qd/%s PAT quota exhausted (code 112), PAT rotated", comboName, modelKey)
+			}
+			// Do not retry another model after partial output reached client.
+			if roleSent {
+				break comboRounds
+			}
 		}
 		if round+1 < maxRounds {
 			log.Printf("combo %q: round %d complete, all models failed, starting round %d", comboName, round+1, round+2)
@@ -565,39 +613,48 @@ func runWithPATRotation(ctx context.Context, pool *PATPool, modelKey string, mes
 		}
 	}
 
-	// Try up to pool.Len() PATs, 3 rounds max
+	// Try at most three distinct PATs while respecting random/round-robin selection.
 	maxAttempts := pool.Len()
+	if maxAttempts > 3 {
+		maxAttempts = 3
+	}
 	if maxAttempts < 1 {
 		maxAttempts = 1
 	}
-	const maxRounds = 3
 
 	var result *ChatResult
 	var lastErr error
 	var pat string
-	totalAttempts := 0
-	for round := 0; round < maxRounds; round++ {
-		for attempt := 0; attempt < maxAttempts; attempt++ {
-			totalAttempts++
-			pat = pool.Next()
-			result, lastErr = callQoder(ctx, pat, modelKey, messages, maxTokens, onChunk, tools, thinkingEffort, contextWindow)
-			if lastErr == nil && result != nil && strings.TrimSpace(result.Text) != "" {
-				// Success with non-empty response
-				goto done
-			}
-			if lastErr == nil && (result == nil || strings.TrimSpace(result.Text) == "") {
-				lastErr = fmt.Errorf("empty response from upstream")
-				log.Printf("qd %s: empty response (pat: %s, attempt %d)", modelKey, maskPAT(pat), totalAttempts)
-			} else {
-				log.Printf("qd %s error: %v (pat: %s, attempt %d)", modelKey, lastErr, maskPAT(pat), totalAttempts)
-			}
-			if ctx.Err() != nil {
-				lastErr = ctx.Err()
-				goto done
+	used := make(map[string]bool, maxAttempts)
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		pat = pool.NextAvoid(used)
+		if pat == "" {
+			break
+		}
+		used[pat] = true
+		emitted := false
+		callback := onChunk
+		if onChunk != nil {
+			callback = func(text string) {
+				emitted = true
+				onChunk(text)
 			}
 		}
-		if round+1 < maxRounds {
-			log.Printf("qd %s: round %d complete, all PATs failed, starting round %d", modelKey, round+1, round+2)
+		result, lastErr = callQoder(ctx, pat, modelKey, messages, maxTokens, callback, tools, thinkingEffort, contextWindow)
+		if lastErr == nil && result != nil && strings.TrimSpace(result.Text) != "" {
+			goto done
+		}
+		if lastErr == nil {
+			lastErr = fmt.Errorf("empty response from upstream")
+		}
+		log.Printf("qd %s error: %v (pat: %s, attempt %d/%d)", modelKey, lastErr, maskPAT(pat), attempt+1, maxAttempts)
+		// Retrying after streaming bytes would concatenate two generations.
+		// Also stop if error is not retryable (e.g. pricing/quota limit).
+		if emitted || !isRetryableError(lastErr) || ctx.Err() != nil {
+			if ctx.Err() != nil {
+				lastErr = ctx.Err()
+			}
+			break
 		}
 	}
 done:
@@ -652,11 +709,27 @@ func upstreamStatusCode(err error) int {
 
 func isAuthError(err error) bool {
 	if ue, ok := err.(*UpstreamError); ok {
-		return ue.StatusCode == 401 || ue.StatusCode == 403
+		if ue.StatusCode == 401 {
+			return true
+		}
+		// 403 is auth only if it's NOT a pricing/quota error (code 112)
+		if ue.StatusCode == 403 && !isPricingError(err) {
+			return true
+		}
+		return false
 	}
 	s := err.Error()
-	return strings.Contains(s, "401") || strings.Contains(s, "403") ||
-		strings.Contains(s, "expired") || strings.Contains(s, "unauthorized")
+	return strings.Contains(s, "401") || strings.Contains(s, "unauthorized") ||
+		strings.Contains(s, "expired")
+}
+
+// isPricingError returns true for 403 code 112 — this PAT's quota/pricing limit.
+// The PAT is exhausted; rotating to another PAT may succeed.
+func isPricingError(err error) bool {
+	if ue, ok := err.(*UpstreamError); ok {
+		return ue.StatusCode == 403 && strings.Contains(ue.Body, "\"112\"")
+	}
+	return false
 }
 
 // isQueueError returns true if the error is a Qoder queue/rate-limit error (403 with isQueued=true).
@@ -665,6 +738,21 @@ func isQueueError(err error) bool {
 		return ue.StatusCode == 403 && strings.Contains(ue.Body, "isQueued")
 	}
 	return false
+}
+
+// isRetryableError returns true if trying a different PAT might succeed.
+func isRetryableError(err error) bool {
+	if isPricingError(err) {
+		return true // this PAT's quota exhausted — next PAT might work
+	}
+	if isAuthError(err) || isQueueError(err) {
+		return true
+	}
+	if ue, ok := err.(*UpstreamError); ok {
+		return ue.StatusCode == 429 || ue.StatusCode >= 500
+	}
+	// network / parse errors are retryable
+	return true
 }
 
 // ── Model & combo resolution ────────────────────────────────────────────────
