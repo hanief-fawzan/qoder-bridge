@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"math/big"
 	"net/http"
@@ -193,6 +194,9 @@ func (p *PATPool) Len() int {
 type ChatMessage struct {
 	Role    string      `json:"role"`
 	Content interface{} `json:"content"`
+	// Extra stores tool_calls and tool_call_id from deserialized OpenAI messages.
+	// These fields aren't in the standard JSON but are injected by the proxy.
+	Extra map[string]interface{} `json:"-"`
 }
 
 type ToolDef struct {
@@ -367,10 +371,44 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Buffer body so we can decode twice (ChatRequest + raw extra fields)
+	bodyBytes, err := io.ReadAll(io.LimitReader(r.Body, 10<<20))
+	if err != nil {
+		sendJSONError(w, 400, "failed to read body")
+		return
+	}
+
 	var req ChatRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.Unmarshal(bodyBytes, &req); err != nil {
 		sendJSONError(w, 400, fmt.Sprintf("bad request: %s", err))
 		return
+	}
+
+	// Extract tool_calls and tool_call_id into Extra map
+	// ponytail: single-pass raw decode, only for messages that need it
+	var rawReq struct {
+		Messages []json.RawMessage `json:"messages"`
+	}
+	if json.Unmarshal(bodyBytes, &rawReq) == nil && len(rawReq.Messages) == len(req.Messages) {
+		for i, raw := range rawReq.Messages {
+			var extra struct {
+				ToolCalls  json.RawMessage `json:"tool_calls"`
+				ToolCallID string          `json:"tool_call_id"`
+			}
+			if json.Unmarshal(raw, &extra) == nil {
+				if len(extra.ToolCalls) > 0 || extra.ToolCallID != "" {
+					req.Messages[i].Extra = make(map[string]interface{})
+					if len(extra.ToolCalls) > 0 {
+						var tcParsed interface{}
+						json.Unmarshal(extra.ToolCalls, &tcParsed)
+						req.Messages[i].Extra["tool_calls"] = tcParsed
+					}
+					if extra.ToolCallID != "" {
+						req.Messages[i].Extra["tool_call_id"] = extra.ToolCallID
+					}
+				}
+			}
+		}
 	}
 
 	if patPool.Len() == 0 {
@@ -700,7 +738,7 @@ func runWithPATRotation(ctx context.Context, pool *PATPool, modelKey string, mes
 			}
 		}
 		result, lastErr = callQoder(ctx, pat, modelKey, messages, maxTokens, callback, tools, thinkingEffort, contextWindow)
-		if lastErr == nil && result != nil && strings.TrimSpace(result.Text) != "" {
+		if lastErr == nil && result != nil && (strings.TrimSpace(result.Text) != "" || len(result.ToolCalls) > 0) {
 			goto done
 		}
 		if lastErr == nil {

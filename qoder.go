@@ -8,6 +8,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
@@ -369,49 +370,68 @@ func normalizeMessages(messages []ChatMessage, tools []ToolDef) ([]ChatMessage, 
 	for _, m := range messages {
 		text := extractText(m.Content)
 		switch m.Role {
-		case "system":
+		case "system", "developer":
 			if text != "" {
 				systemParts = append(systemParts, text)
 			}
 			continue
 		case "tool":
-			// Convert tool result to readable user message with context
+			// Preserve tool result with ID for context continuity
+			callID := ""
+			if tcID, ok := m.Extra["tool_call_id"].(string); ok {
+				callID = tcID
+			}
 			if text != "" {
-				out = append(out, ChatMessage{
-					Role:    "user",
-					Content: "[Tool Result]\n" + text,
-				})
+				if callID != "" {
+					out = append(out, ChatMessage{Role: "user", Content: fmt.Sprintf("<tool_result id=%q>\n%s\n</tool_result>", callID, text)})
+				} else {
+					out = append(out, ChatMessage{Role: "user", Content: "[Tool Result]\n" + text})
+				}
 			}
 			continue
 		case "assistant":
-			// Preserve assistant message even if content is empty (has tool_calls)
-			// The raw content may contain tool_calls JSON from the original model
-			out = append(out, ChatMessage{Role: m.Role, Content: text})
+			// Serialize assistant message + any tool_calls for context continuity
+			parts := []string{}
+			if text != "" {
+				parts = append(parts, text)
+			}
+			if tcRaw, ok := m.Extra["tool_calls"]; ok {
+				if tcJSON, err := json.Marshal(tcRaw); err == nil {
+					parts = append(parts, fmt.Sprintf("[assistant tool_calls: %s]", string(tcJSON)))
+				}
+			}
+			if len(parts) > 0 {
+				out = append(out, ChatMessage{Role: "assistant", Content: strings.Join(parts, "\n")})
+			}
 			continue
 		}
 		out = append(out, ChatMessage{Role: m.Role, Content: text})
 	}
 
-	// Inject tool definitions into system prompt
+	// Inject tool definitions into system prompt (matching qoder-proxy format)
 	if len(tools) > 0 {
-		var toolParts []string
-		toolParts = append(toolParts, "You have access to the following tools. To call a tool, respond with a JSON block:")
-		toolParts = append(toolParts, "```tool_call\n{\"name\": \"tool_name\", \"arguments\": {...}}\n```")
-		toolParts = append(toolParts, "")
+		var toolDescriptions []map[string]interface{}
 		for _, t := range tools {
-			desc := t.Function.Description
-			if desc == "" {
-				desc = "(no description)"
+			desc := map[string]interface{}{
+				"name":        t.Function.Name,
+				"description": t.Function.Description,
+				"parameters":  t.Function.Parameters,
 			}
-			// Include parameter schema for each tool
-			paramJSON, _ := json.Marshal(t.Function.Parameters)
-			if string(paramJSON) == "null" || string(paramJSON) == "{}" {
-				toolParts = append(toolParts, fmt.Sprintf("- %s: %s", t.Function.Name, desc))
-			} else {
-				toolParts = append(toolParts, fmt.Sprintf("- %s: %s\n  Parameters: %s", t.Function.Name, desc, string(paramJSON)))
-			}
+			toolDescriptions = append(toolDescriptions, desc)
 		}
-		systemParts = append([]string{strings.Join(toolParts, "\n")}, systemParts...)
+		toolJSON, _ := json.MarshalIndent(toolDescriptions, "", "  ")
+		toolPrompt := fmt.Sprintf(`[Tool Protocol] 以下工具可供调用：
+
+%s
+
+如需调用工具，请仅输出以下格式的 JSON 代码块：
+` + "```" + `json
+{"tool_calls": [{"name": "工具名称", "arguments": {参数对象}}]}
+` + "```" + `
+
+如不需要调用工具，直接以正常文本回复，不要输出任何 JSON 代码块。
+不要在同一个回复中既输出普通文本又输出工具调用 JSON。`, string(toolJSON))
+		systemParts = append([]string{toolPrompt}, systemParts...)
 	}
 
 	return out, strings.Join(systemParts, "\n\n")
@@ -486,72 +506,171 @@ func truncate(s string, n int) string {
 	return s
 }
 
-// parseToolCallsFromText extracts ```tool_call blocks from Qoder text response.
+// parseToolCallsFromText extracts tool_calls from Qoder text response.
+// Handles two formats:
+//  1. ```json\n{"tool_calls": [...]}\n```  (preferred, matching qoder-proxy)
+//  2. Balanced JSON extraction with brace counting (fallback)
 // Returns parsed tool_calls and clean text with tool_call blocks removed.
 func parseToolCallsFromText(text string) ([]ToolCall, string) {
-	// Pattern: ```tool_call\n{...}\n``` or ```tool_call\n[{...},{...}]\n```
-	re := regexp.MustCompile("(?s)`{3}tool_call\\s*\\n(\\[.*?\\]|\\{.*?\\})\\s*\\n`{3}")
-	matches := re.FindAllStringSubmatch(text, -1)
-	if len(matches) == 0 {
+	// Format 1: ```json ... ``` block
+	jsonBlockRe := regexp.MustCompile("(?s)```json\\s*\\n([\\s\\S]*?)\\n```")
+	blockMatch := jsonBlockRe.FindStringSubmatchIndex(text)
+
+	var jsonString string
+	var prefixText string
+
+	if blockMatch != nil {
+		jsonString = text[blockMatch[2]:blockMatch[3]]
+		prefixText = text[:blockMatch[0]]
+	} else {
+		// Format 2: balanced brace extraction (fallback for missing fences)
+		extracted := extractBalancedJsonWithToolCalls(text)
+		if extracted == nil {
+			return nil, text
+		}
+		jsonString = extracted.json
+		prefixText = extracted.prefix
+	}
+
+	// Parse the JSON
+	parsed, err := parseToolCallsJSON(jsonString)
+	if err != nil || len(parsed) == 0 {
 		return nil, text
 	}
 
+	// Build tool calls
 	var calls []ToolCall
-	for _, match := range matches {
-		if len(match) < 2 {
+	for _, tc := range parsed {
+		name, _ := tc["name"].(string)
+		if name == "" {
 			continue
 		}
-		raw := match[1]
-
-		// Try parsing as array of calls first
-		var arr []map[string]interface{}
-		if err := json.Unmarshal([]byte(raw), &arr); err == nil {
-			for _, obj := range arr {
-				if tc := mapToToolCall(obj); tc != nil {
-					calls = append(calls, *tc)
-				}
-			}
-			continue
+		args := tc["arguments"]
+		var argsJSON string
+		switch a := args.(type) {
+		case string:
+			argsJSON = a
+		case nil:
+			argsJSON = "{}"
+		default:
+			b, _ := json.Marshal(a)
+			argsJSON = string(b)
 		}
-
-		// Try single object
-		var obj map[string]interface{}
-		if err := json.Unmarshal([]byte(raw), &obj); err == nil {
-			if tc := mapToToolCall(obj); tc != nil {
-				calls = append(calls, *tc)
-			}
+		if argsJSON == "" {
+			argsJSON = "{}"
 		}
+		calls = append(calls, ToolCall{
+			ID:       generateCallID(),
+			Type:     "function",
+			Function: ToolCallFn{Name: name, Arguments: argsJSON},
+		})
 	}
 
-	// Remove tool_call blocks from text
-	cleanText := re.ReplaceAllString(text, "")
-	cleanText = strings.TrimSpace(cleanText)
+	if len(calls) == 0 {
+		return nil, text
+	}
 
+	// Remove tool_call blocks from text, preserve prefix
+	cleanText := strings.TrimSpace(prefixText)
 	return calls, cleanText
 }
 
-func mapToToolCall(obj map[string]interface{}) *ToolCall {
-	name, _ := obj["name"].(string)
-	if name == "" {
-		return nil
+// balancedExtract holds a JSON string and the prefix text before it.
+type balancedExtract struct {
+	json   string
+	prefix string
+}
+
+// extractBalancedJsonWithToolCalls uses brace counting to find the outermost
+// balanced JSON object containing "tool_calls". More robust than regex for
+// nested objects. Matches qoder-proxy's extractBalancedJsonWithToolCalls.
+func extractBalancedJsonWithToolCalls(text string) *balancedExtract {
+	for start := 0; start < len(text); start++ {
+		if text[start] != '{' {
+			continue
+		}
+
+		depth := 0
+		inString := false
+		escapeNext := false
+		end := start
+
+		for i := start; i < len(text); i++ {
+			ch := text[i]
+			if escapeNext {
+				escapeNext = false
+				continue
+			}
+			if ch == '\\' && inString {
+				escapeNext = true
+				continue
+			}
+			if ch == '"' {
+				inString = !inString
+				continue
+			}
+			if inString {
+				continue
+			}
+			if ch == '{' {
+				depth++
+			}
+			if ch == '}' {
+				depth--
+				if depth == 0 {
+					end = i
+					break
+				}
+			}
+		}
+
+		if depth != 0 {
+			continue // unbalanced
+		}
+
+		candidate := text[start : end+1]
+		if !strings.Contains(candidate, `"tool_calls"`) {
+			continue
+		}
+
+		if parsed, err := parseToolCallsJSON(candidate); err == nil && len(parsed) > 0 {
+			return &balancedExtract{
+				json:   candidate,
+				prefix: text[:start],
+			}
+		}
 	}
-	args := obj["arguments"]
-	var argsJSON string
-	switch a := args.(type) {
-	case string:
-		argsJSON = a
-	default:
-		b, _ := json.Marshal(a)
-		argsJSON = string(b)
+	return nil
+}
+
+// parseToolCallsJSON parses a JSON string that may contain tool_calls in either:
+//   - {"tool_calls": [{"name": "...", "arguments": {...}}]}
+//   - [{"name": "...", "arguments": {...}}]
+func parseToolCallsJSON(jsonStr string) ([]map[string]interface{}, error) {
+	// Try {"tool_calls": [...]} first
+	var withKey struct {
+		ToolCalls []map[string]interface{} `json:"tool_calls"`
 	}
-	if argsJSON == "" {
-		argsJSON = "{}"
+	if err := json.Unmarshal([]byte(jsonStr), &withKey); err == nil && len(withKey.ToolCalls) > 0 {
+		return withKey.ToolCalls, nil
 	}
-	return &ToolCall{
-		ID:       "call_" + uuidString()[:8],
-		Type:     "function",
-		Function: ToolCallFn{Name: name, Arguments: argsJSON},
+
+	// Try bare array [...]
+	var arr []map[string]interface{}
+	if err := json.Unmarshal([]byte(jsonStr), &arr); err == nil && len(arr) > 0 {
+		if _, hasName := arr[0]["name"]; hasName {
+			return arr, nil
+		}
 	}
+
+	return nil, fmt.Errorf("no tool_calls found")
+}
+
+// generateCallID creates an OpenAI-compatible call ID (24 hex chars).
+func generateCallID() string {
+	b := make([]byte, 12)
+	rand.Read(b) //nolint:errcheck
+	return fmt.Sprintf("call_%x", b)
 }
 
 // buildQoderRequestBody creates the exact JSON payload Qoder expects.

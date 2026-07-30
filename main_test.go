@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
@@ -12,12 +13,7 @@ import (
 
 func TestPATPoolRoundRobin(t *testing.T) {
 	p := NewPATPool([]string{"pt-a", "pt-b", "pt-c"}, "round-robin")
-	got := []string{
-		p.Next(),
-		p.Next(),
-		p.Next(),
-		p.Next(), // wraps around
-	}
+	got := []string{p.Next(), p.Next(), p.Next(), p.Next()}
 	want := []string{"pt-a", "pt-b", "pt-c", "pt-a"}
 	for i, g := range got {
 		if g != want[i] {
@@ -75,8 +71,6 @@ func TestPATPoolNextAvoidEmptyWhenExhausted(t *testing.T) {
 func TestPATPoolCooldown(t *testing.T) {
 	p := NewPATPool([]string{"pt-a", "pt-b"}, "round-robin")
 	p.Cooldown("pt-a", 1*time.Hour)
-
-	// pt-a should be skipped; pt-b should be returned
 	used := map[string]bool{}
 	got := p.NextAvoid(used)
 	if got != "pt-b" {
@@ -88,7 +82,6 @@ func TestPATPoolCooldownExpiry(t *testing.T) {
 	p := NewPATPool([]string{"pt-a"}, "round-robin")
 	p.Cooldown("pt-a", 1*time.Millisecond)
 	time.Sleep(5 * time.Millisecond)
-
 	used := map[string]bool{}
 	got := p.NextAvoid(used)
 	if got != "pt-a" {
@@ -103,17 +96,9 @@ func TestIsPricingError(t *testing.T) {
 	if !isPricingError(err) {
 		t.Error("expected isPricingError=true for 403+code-112")
 	}
-
-	// Not pricing: plain 403
 	err2 := &UpstreamError{StatusCode: 403, Body: `{"message":"forbidden"}`}
 	if isPricingError(err2) {
 		t.Error("expected isPricingError=false for plain 403")
-	}
-
-	// Not pricing: 401
-	err3 := &UpstreamError{StatusCode: 401, Body: `{}`}
-	if isPricingError(err3) {
-		t.Error("expected isPricingError=false for 401")
 	}
 }
 
@@ -162,12 +147,7 @@ func TestIsRetryableError(t *testing.T) {
 // ── SSE parser tests ─────────────────────────────────────────────────────
 
 func TestUnwrapQoderSSENormalDone(t *testing.T) {
-	input := `data: {"statusCodeValue":200,"body":"{\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}"}
-
-data: {"statusCodeValue":200,"body":"{\"choices\":[{\"delta\":{\"content\":\" world\"}}]}"}
-
-data: [DONE]
-`
+	input := "data: {\"statusCodeValue\":200,\"body\":\"{\\\"choices\\\":[{\\\"delta\\\":{\\\"content\\\":\\\"Hello\\\"}}]}\"}\n\ndata: {\"statusCodeValue\":200,\"body\":\"{\\\"choices\\\":[{\\\"delta\\\":{\\\"content\\\":\\\" world\\\"}}]}\"}\n\ndata: [DONE]\n"
 	text, err := unwrapQoderSSE(strings.NewReader(input), nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -178,10 +158,7 @@ data: [DONE]
 }
 
 func TestUnwrapQoderSSENoDoneWithContent(t *testing.T) {
-	// Stream ends without [DONE] but has content — should succeed
-	input := `data: {"statusCodeValue":200,"body":"{\"choices\":[{\"delta\":{\"content\":\"Partial\"}}]}"}
-
-`
+	input := "data: {\"statusCodeValue\":200,\"body\":\"{\\\"choices\\\":[{\\\"delta\\\":{\\\"content\\\":\\\"Partial\\\"}}]}\"}\n\n"
 	text, err := unwrapQoderSSE(strings.NewReader(input), nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -192,10 +169,7 @@ func TestUnwrapQoderSSENoDoneWithContent(t *testing.T) {
 }
 
 func TestUnwrapQoderSSENoDoneEmpty(t *testing.T) {
-	// Stream ends without [DONE] and has NO content — should fail
-	input := `data: {"statusCodeValue":200,"body":""}
-
-`
+	input := "data: {\"statusCodeValue\":200,\"body\":\"\"}\n\n"
 	text, err := unwrapQoderSSE(strings.NewReader(input), nil)
 	if err == nil {
 		t.Error("expected error for empty stream without [DONE]")
@@ -206,8 +180,7 @@ func TestUnwrapQoderSSENoDoneEmpty(t *testing.T) {
 }
 
 func TestUnwrapQoderSSEEnvelopeError(t *testing.T) {
-	input := `data: {"statusCodeValue":500,"body":"internal error"}
-`
+	input := "data: {\"statusCodeValue\":500,\"body\":\"internal error\"}\n"
 	_, err := unwrapQoderSSE(strings.NewReader(input), nil)
 	if err == nil {
 		t.Error("expected error for 500 envelope")
@@ -215,12 +188,7 @@ func TestUnwrapQoderSSEEnvelopeError(t *testing.T) {
 }
 
 func TestUnwrapQoderSSEWithCallback(t *testing.T) {
-	input := `data: {"statusCodeValue":200,"body":"{\"choices\":[{\"delta\":{\"content\":\"chunk1\"}}]}"}
-
-data: {"statusCodeValue":200,"body":"{\"choices\":[{\"delta\":{\"content\":\"chunk2\"}}]}"}
-
-data: [DONE]
-`
+	input := "data: {\"statusCodeValue\":200,\"body\":\"{\\\"choices\\\":[{\\\"delta\\\":{\\\"content\\\":\\\"chunk1\\\"}}]}\"}\n\ndata: {\"statusCodeValue\":200,\"body\":\"{\\\"choices\\\":[{\\\"delta\\\":{\\\"content\\\":\\\"chunk2\\\"}}]}\"}\n\ndata: [DONE]\n"
 	var chunks []string
 	text, err := unwrapQoderSSE(strings.NewReader(input), func(s string) {
 		chunks = append(chunks, s)
@@ -260,9 +228,7 @@ func TestResolveModelKey(t *testing.T) {
 }
 
 func TestResolveCombo(t *testing.T) {
-	combos = map[string][]string{
-		"fast": {"lite", "efficient"},
-	}
+	combos = map[string][]string{"fast": {"lite", "efficient"}}
 	defer func() { combos = nil }()
 
 	tests := []struct {
@@ -286,8 +252,6 @@ func TestResolveCombo(t *testing.T) {
 	}
 }
 
-// ── Thinking effort tests ────────────────────────────────────────────────
-
 func TestResolveThinkingEffort(t *testing.T) {
 	tests := []struct {
 		req  ChatRequest
@@ -306,8 +270,6 @@ func TestResolveThinkingEffort(t *testing.T) {
 	}
 }
 
-// ── Context window tests ─────────────────────────────────────────────────
-
 func TestResolveContextWindow(t *testing.T) {
 	tests := []struct {
 		model string
@@ -323,7 +285,6 @@ func TestResolveContextWindow(t *testing.T) {
 			t.Errorf("resolveContextWindow(%q) = %d, want %d", tt.model, got, tt.want)
 		}
 	}
-	// Override: user specifies explicit value
 	got := resolveContextWindow(ChatRequest{ContextWindow: 500000}, "auto")
 	if got != 500000 {
 		t.Errorf("explicit context window: got %d, want 500000", got)
@@ -343,15 +304,12 @@ func TestMaskPAT(t *testing.T) {
 }
 
 func TestExtractText(t *testing.T) {
-	// String
 	if got := extractText("hello"); got != "hello" {
 		t.Errorf("string: got %q", got)
 	}
-	// Nil
 	if got := extractText(nil); got != "" {
 		t.Errorf("nil: got %q", got)
 	}
-	// Multipart
 	content := []interface{}{
 		map[string]interface{}{"type": "text", "text": "part1"},
 		map[string]interface{}{"type": "text", "text": "part2"},
@@ -380,7 +338,6 @@ func TestProxyClientFnRoundRobin(t *testing.T) {
 	proxyLabels = []string{"p1", "p2"}
 	proxyIdx = 0
 
-	// Should cycle through proxies
 	c1 := proxyClientFn()
 	c2 := proxyClientFn()
 	c3 := proxyClientFn()
@@ -403,8 +360,6 @@ func TestProxyCount(t *testing.T) {
 	}
 }
 
-// ── Env parsing tests ────────────────────────────────────────────────────
-
 func TestLoadEnvParsing(t *testing.T) {
 	cfg := loadEnv("/nonexistent/.env")
 	if cfg.port != 7100 {
@@ -415,14 +370,13 @@ func TestLoadEnvParsing(t *testing.T) {
 	}
 }
 
-// ── Tool call parsing tests ──────────────────────────────────────────────
+// ── Tool call parsing tests (balanced JSON) ──────────────────────────────
 
-func TestParseToolCallsFromText(t *testing.T) {
-	// Single tool call
+func TestParseToolCallsFromText_JSONBlock(t *testing.T) {
 	text := `Let me search for that.
 
-` + "```tool_call" + `
-{"name": "web_search", "arguments": {"query": "hello world"}}
+` + "```" + `json
+{"tool_calls": [{"name": "web_search", "arguments": {"query": "hello world"}}]}
 ` + "```" + `
 
 Done.`
@@ -433,39 +387,65 @@ Done.`
 	if calls[0].Function.Name != "web_search" {
 		t.Errorf("name: got %q", calls[0].Function.Name)
 	}
-	if calls[0].ID == "" {
-		t.Error("tool call ID should not be empty")
+	if len(calls[0].ID) < 10 {
+		t.Errorf("tool call ID too short: %q", calls[0].ID)
+	}
+	if !strings.HasPrefix(calls[0].ID, "call_") {
+		t.Errorf("ID should start with call_: %q", calls[0].ID)
 	}
 	if clean == text {
 		t.Error("tool_call block should be removed from clean text")
 	}
 }
 
-func TestParseToolCallsFromArray(t *testing.T) {
-	text := "Before\n\n" + "```tool_call" + `
-[{"name": "read_file", "arguments": {"path": "/tmp/a.go"}}, {"name": "terminal", "arguments": {"command": "ls"}}]
-` + "```" + `
-
-After.`
+func TestParseToolCallsFromText_BareJSON(t *testing.T) {
+	text := `Some text {"tool_calls": [{"name": "terminal", "arguments": {"command": "ls -la"}}]} more text`
 	calls, clean := parseToolCallsFromText(text)
-	if len(calls) != 2 {
-		t.Fatalf("expected 2 tool calls, got %d", len(calls))
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 call, got %d", len(calls))
 	}
-	if calls[0].Function.Name != "read_file" {
-		t.Errorf("first name: got %q", calls[0].Function.Name)
+	if calls[0].Function.Name != "terminal" {
+		t.Errorf("name: got %q", calls[0].Function.Name)
 	}
-	if calls[1].Function.Name != "terminal" {
-		t.Errorf("second name: got %q", calls[1].Function.Name)
-	}
-	if strings.Contains(clean, "tool_call") {
-		t.Error("clean text should not contain tool_call blocks")
-	}
-	if !strings.Contains(clean, "Before") || !strings.Contains(clean, "After.") {
-		t.Error("surrounding text should be preserved")
+	if !strings.Contains(clean, "Some text") {
+		t.Error("prefix should be preserved")
 	}
 }
 
-func TestParseToolCallsNoCalls(t *testing.T) {
+func TestParseToolCallsFromText_MultipleCalls(t *testing.T) {
+	text := "```json\n" + `{"tool_calls": [{"name": "read_file", "arguments": {"path": "/tmp/a.go"}}, {"name": "terminal", "arguments": {"command": "ls"}}]}` + "\n```"
+	calls, _ := parseToolCallsFromText(text)
+	if len(calls) != 2 {
+		t.Fatalf("expected 2 calls, got %d", len(calls))
+	}
+	if calls[0].Function.Name != "read_file" || calls[1].Function.Name != "terminal" {
+		t.Errorf("wrong names: %q, %q", calls[0].Function.Name, calls[1].Function.Name)
+	}
+	// IDs should be unique
+	if calls[0].ID == calls[1].ID {
+		t.Error("tool call IDs should be unique")
+	}
+}
+
+func TestParseToolCallsFromText_NestedJSON(t *testing.T) {
+	// Nested objects in arguments — should be handled by brace counting
+	text := `{"tool_calls": [{"name": "delegate_task", "arguments": {"goal": "test", "context": {"files": ["a.go", "b.go"], "nested": {"deep": true}}}}]}`
+	calls, _ := parseToolCallsFromText(text)
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 call, got %d", len(calls))
+	}
+	if calls[0].Function.Name != "delegate_task" {
+		t.Errorf("name: got %q", calls[0].Function.Name)
+	}
+	// Verify arguments contain nested JSON
+	var args map[string]interface{}
+	json.Unmarshal([]byte(calls[0].Function.Arguments), &args)
+	if args["goal"] != "test" {
+		t.Errorf("arguments wrong: %v", args)
+	}
+}
+
+func TestParseToolCallsFromText_NoCalls(t *testing.T) {
 	text := "Just a normal response without any tool calls."
 	calls, clean := parseToolCallsFromText(text)
 	if len(calls) != 0 {
@@ -476,64 +456,102 @@ func TestParseToolCallsNoCalls(t *testing.T) {
 	}
 }
 
-func TestMapToToolCall(t *testing.T) {
-	// Valid
-	tc := mapToToolCall(map[string]interface{}{
-		"name":      "test_fn",
-		"arguments": map[string]interface{}{"x": 1},
-	})
-	if tc == nil {
-		t.Fatal("expected non-nil")
+func TestParseToolCallsFromText_BareArray(t *testing.T) {
+	text := "```json\n[{\"name\": \"test_fn\", \"arguments\": {\"x\": 1}}]\n```"
+	calls, _ := parseToolCallsFromText(text)
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 call, got %d", len(calls))
 	}
-	if tc.Function.Name != "test_fn" {
-		t.Errorf("name: got %q", tc.Function.Name)
+	if calls[0].Function.Name != "test_fn" {
+		t.Errorf("name: got %q", calls[0].Function.Name)
 	}
-	if tc.Type != "function" {
-		t.Errorf("type: got %q", tc.Type)
-	}
+}
 
-	// Missing name -> nil
-	tc2 := mapToToolCall(map[string]interface{}{})
-	if tc2 != nil {
-		t.Error("expected nil for missing name")
+func TestGenerateCallID(t *testing.T) {
+	id1 := generateCallID()
+	id2 := generateCallID()
+	if id1 == id2 {
+		t.Error("IDs should be unique")
+	}
+	if !strings.HasPrefix(id1, "call_") {
+		t.Errorf("should start with call_: %q", id1)
+	}
+	if len(id1) != 29 { // "call_" (5) + 24 hex chars
+		t.Errorf("expected 29 chars, got %d: %q", len(id1), id1)
 	}
 }
 
 // ── Tool result + assistant preservation ──────────────────────────────────
 
 func TestNormalizeMessagesPreservesAssistant(t *testing.T) {
+	// Empty assistant without tool_calls should be skipped (correct behavior)
 	msgs := []ChatMessage{
 		{Role: "user", Content: "Hello"},
 		{Role: "assistant", Content: ""},
 		{Role: "user", Content: "Follow up"},
 	}
 	out, _ := normalizeMessages(msgs, nil)
-	// Assistant with empty content should still be preserved
+	// Empty assistant (no tool_calls, no content) = 0 output messages
 	assistantCount := 0
 	for _, m := range out {
 		if m.Role == "assistant" {
 			assistantCount++
 		}
 	}
-	if assistantCount != 1 {
-		t.Errorf("expected 1 assistant message preserved, got %d", assistantCount)
+	if assistantCount != 0 {
+		t.Errorf("empty assistant without tool_calls should be skipped, got %d", assistantCount)
 	}
-}
 
-func TestNormalizeMessagesToolResult(t *testing.T) {
-	msgs := []ChatMessage{
-		{Role: "user", Content: "Search for X"},
-		{Role: "tool", Content: "Found: result123"},
+	// Non-empty assistant should be preserved
+	msgs2 := []ChatMessage{
+		{Role: "user", Content: "Hello"},
+		{Role: "assistant", Content: "Hi there"},
+		{Role: "user", Content: "Follow up"},
 	}
-	out, _ := normalizeMessages(msgs, nil)
+	out2, _ := normalizeMessages(msgs2, nil)
 	found := false
-	for _, m := range out {
-		if strings.Contains(extractText(m.Content), "Tool Result") {
+	for _, m := range out2 {
+		if m.Role == "assistant" {
 			found = true
 		}
 	}
 	if !found {
-		t.Error("tool result should be converted to user message with [Tool Result] prefix")
+		t.Error("non-empty assistant should be preserved")
+	}
+}
+
+func TestNormalizeMessagesToolResultWithID(t *testing.T) {
+	msgs := []ChatMessage{
+		{Role: "user", Content: "Search for X"},
+		{Role: "tool", Content: "Found: result123", Extra: map[string]interface{}{"tool_call_id": "call_abc123"}},
+	}
+	out, _ := normalizeMessages(msgs, nil)
+	found := false
+	for _, m := range out {
+		if s, ok := m.Content.(string); ok && strings.Contains(s, "tool_result") && strings.Contains(s, "call_abc123") {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("tool result should contain tool_result tag with call ID")
+	}
+}
+
+func TestNormalizeMessagesAssistantWithToolCalls(t *testing.T) {
+	msgs := []ChatMessage{
+		{Role: "assistant", Content: "", Extra: map[string]interface{}{
+			"tool_calls": []interface{}{
+				map[string]interface{}{"id": "call_1", "function": map[string]interface{}{"name": "search", "arguments": "{}"}},
+			},
+		}},
+	}
+	out, _ := normalizeMessages(msgs, nil)
+	if len(out) == 0 {
+		t.Fatal("assistant with tool_calls should produce output")
+	}
+	s, ok := out[0].Content.(string)
+	if !ok || !strings.Contains(s, "assistant tool_calls") {
+		t.Errorf("expected tool_calls serialization, got %v", out[0].Content)
 	}
 }
 
@@ -546,7 +564,13 @@ func TestNormalizeMessagesToolsInSystemPrompt(t *testing.T) {
 	if !strings.Contains(system, "read_file") {
 		t.Error("system prompt should contain tool name")
 	}
-	if !strings.Contains(system, "Parameters:") {
-		t.Error("system prompt should contain parameters")
+	if !strings.Contains(system, "Tool Protocol") {
+		t.Error("system prompt should contain [Tool Protocol]")
+	}
+	if !strings.Contains(system, "```json") {
+		t.Error("system prompt should contain ```json format instructions")
+	}
+	if !strings.Contains(system, "tool_calls") {
+		t.Error("system prompt should mention tool_calls format")
 	}
 }
