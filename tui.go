@@ -152,7 +152,9 @@ func apiKeyMenu() tview.Primitive {
 			} else {
 				cfgSet("api_key_enabled", "1")
 			}
-			showMsg("✅ Toggled! Re-open to see new status.", "apikey", apiKeyMenu)
+			// Rebuild so status text updates
+			pages.RemovePage("sub")
+			pushPage("sub", apiKeyMenu())
 		}).
 		AddItem("  View Current Key", masked, 'v', func() {
 			if key == "" {
@@ -164,7 +166,8 @@ func apiKeyMenu() tview.Primitive {
 		AddItem("  Clear Key", "Remove key entirely", 'x', func() {
 			cfgSet("api_key", "")
 			cfgSet("api_key_enabled", "0")
-			showMsg("🗑 API key removed.", "apikey", apiKeyMenu)
+			pages.RemovePage("sub")
+			pushPage("sub", apiKeyMenu())
 		}).
 		AddItem("  ← Back", "Esc to go back", 'b', func() { goBack() })
 
@@ -251,11 +254,14 @@ func strategyMenu() tview.Primitive {
 	list := tview.NewList().
 		AddItem(rr, "Cycle PATs in order", 'r', func() {
 			cfgSet("pat_strategy", "round-robin")
-			showMsg("✅ Strategy: round-robin", "strategy", strategyMenu)
+			// Rebuild menu so ✓ updates immediately
+			pages.RemovePage("sub")
+			pushPage("sub", strategyMenu())
 		}).
 		AddItem(rn, "Random PAT each request", 'd', func() {
 			cfgSet("pat_strategy", "random")
-			showMsg("✅ Strategy: random", "strategy", strategyMenu)
+			pages.RemovePage("sub")
+			pushPage("sub", strategyMenu())
 		}).
 		AddItem("  ← Back", "Esc", 'b', func() { goBack() })
 
