@@ -730,7 +730,11 @@ func unwrapQoderSSE(body io.Reader, onChunk StreamCallback) (string, error) {
 		return full.String(), err
 	}
 	if !sawDone {
-		return full.String(), fmt.Errorf("qoder stream ended before [DONE]")
+		// Some upstream responses end cleanly without a [DONE] sentinel.
+		// If we already collected content, treat it as a successful stream.
+		if full.Len() == 0 {
+			return "", fmt.Errorf("qoder stream ended before [DONE]")
+		}
 	}
 
 	return full.String(), nil
