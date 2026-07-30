@@ -991,6 +991,8 @@ func runServe(args []string) {
 	if err := initDB(); err != nil {
 		log.Printf("warn: db init failed: %v (logging disabled)", err)
 	} else {
+		// Auto-import .env values to DB on first run
+		importEnvFromConfig(cfg)
 		// DB config overrides .env
 		if v := cfgGet("api_key"); v != "" {
 			apiKey = v

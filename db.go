@@ -102,6 +102,33 @@ func cfgSet(key, value string) {
 	db.Exec(`INSERT INTO config(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, key, value)
 }
 
+// importEnvFromConfig migrates .env values to DB (only when DB key is empty).
+// Called once on startup — after first run, DB is the source of truth.
+func importEnvFromConfig(cfg *envConfig) {
+	imports := map[string]string{}
+	if cfg.apiKey != "" && cfgGet("api_key") == "" {
+		imports["api_key"] = cfg.apiKey
+		imports["api_key_enabled"] = "1"
+	}
+	if cfg.requestDelay > 0 && cfgGet("request_delay_ms") == "" {
+		imports["request_delay_ms"] = fmt.Sprintf("%d", cfg.requestDelay)
+	}
+	if cfg.strategy != "" && cfgGet("pat_strategy") == "" {
+		imports["pat_strategy"] = cfg.strategy
+	}
+	// Proxy comes from env var
+	if p := os.Getenv("QODER_PROXY"); p != "" && cfgGet("proxy") == "" {
+		imports["proxy"] = p
+	}
+	if len(imports) == 0 {
+		return
+	}
+	for k, v := range imports {
+		cfgSet(k, v)
+		log.Printf("  imported from .env: %s", k)
+	}
+}
+
 func cfgBool(key string, def bool) bool {
 	v := cfgGet(key)
 	if v == "" {

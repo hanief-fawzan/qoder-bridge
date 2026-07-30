@@ -47,7 +47,7 @@ func runConfigCLI(args []string) {
 }
 
 func configHelp() {
-	fmt.Println(`qoder-bridge config — manage runtime configuration
+	fmt.Print(`qoder-bridge config — manage runtime configuration
 
 Usage:
   qoder-bridge config              Show all config
