@@ -1,0 +1,14 @@
+services:
+  qoder-bridge:
+    build: .
+    container_name: qoder-bridge
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:7100:7100"
+    env_file:
+      - .env
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:7100/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3

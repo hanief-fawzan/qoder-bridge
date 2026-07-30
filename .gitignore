@@ -1,0 +1,6 @@
+.env
+*.exe
+qoder-bridge
+data/
+*.log
+*.tmp
