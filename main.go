@@ -1050,6 +1050,23 @@ func runUpdate(args []string) {
 	// Copy binary
 	exe := filepath.Join(projDir, "qoder-bridge")
 	dest := filepath.Join(os.Getenv("HOME"), ".local", "bin", "qoder-bridge")
+
+	// Stop running instance first (binary is busy while running)
+	stopped := false
+	if pid, err := readPID(); err == nil && isRunning(pid) {
+		fmt.Printf("  stopping (PID %d)... ", pid)
+		syscall.Kill(pid, syscall.SIGTERM)
+		time.Sleep(1 * time.Second)
+		stopped = true
+		fmt.Println("ok")
+	} else if err := exec.Command("systemctl", "stop", "qoder-bridge").Run(); err == nil {
+		stopped = true
+		fmt.Println("  stopped (systemd)... ok")
+	} else if err := exec.Command("systemctl", "--user", "stop", "qoder-bridge").Run(); err == nil {
+		stopped = true
+		fmt.Println("  stopped (systemd user)... ok")
+	}
+
 	fmt.Printf("  installing to %s... ", dest)
 	if err := runCmd(projDir, "cp", exe, dest); err != nil {
 		fmt.Printf("FAILED: %v\n", err)
@@ -1058,19 +1075,17 @@ func runUpdate(args []string) {
 	runCmd(projDir, "chmod", "+x", dest)
 	fmt.Println("ok")
 
-	// Restart if running
-	pid, err := readPID()
-	if err == nil && isRunning(pid) {
-		fmt.Printf("  restarting (PID %d)... ", pid)
-		syscall.Kill(pid, syscall.SIGTERM)
-		time.Sleep(1 * time.Second)
+	// Restart
+	if stopped {
+		fmt.Print("  restarting... ")
+		if err := exec.Command("systemctl", "start", "qoder-bridge").Run(); err != nil {
+			if err := exec.Command("systemctl", "--user", "start", "qoder-bridge").Run(); err != nil {
+				fmt.Printf("start manually: %s\n", dest)
+			}
+		}
+		fmt.Println("ok")
 	} else {
-		fmt.Printf("  not running\n")
-	}
-
-	// Start new instance
-	if err := runCmd(".", dest); err != nil {
-		fmt.Printf("  start manually: %s\n", dest)
+		fmt.Printf("  not running — start with: %s\n", dest)
 	}
 
 	fmt.Println("update complete!")
