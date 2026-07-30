@@ -1,6 +1,11 @@
 .env
-*.exe
+# Build
 qoder-bridge
+dist/
+*.exe
+
+# Generated
+release.sh
 data/
 *.log
 *.tmp
