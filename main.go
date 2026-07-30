@@ -763,8 +763,7 @@ func removePID() {
 }
 
 func isRunning(pid int) bool {
-	err := syscall.Kill(pid, 0)
-	return err == nil
+	return processExists(pid)
 }
 
 // ── Subcommands ─────────────────────────────────────────────────────────────
@@ -930,7 +929,7 @@ func runDaemonize(args []string) {
 	proc, err := os.StartProcess(exe, childArgs, &os.ProcAttr{
 		Dir:   ".",
 		Files: []*os.File{os.Stdin, f, f},
-		Sys:   &syscall.SysProcAttr{Setsid: true},
+		Sys:   sysProcAttr(),
 	})
 	f.Close()
 	if err != nil {
@@ -958,7 +957,7 @@ func runDaemonize(args []string) {
 func runStop(args []string) {
 	// Try PID file first (daemon mode)
 	if pid, err := readPID(); err == nil && isRunning(pid) {
-		if err := syscall.Kill(pid, syscall.SIGTERM); err != nil {
+		if err := sendSignal(pid); err != nil {
 			fmt.Fprintf(os.Stderr, "cannot stop PID %d: %v\n", pid, err)
 			os.Exit(1)
 		}
@@ -1066,7 +1065,7 @@ func runUpdate(args []string) {
 	stopped := false
 	if pid, err := readPID(); err == nil && isRunning(pid) {
 		fmt.Printf("  stopping (PID %d)... ", pid)
-		syscall.Kill(pid, syscall.SIGTERM)
+		sendSignal(pid)
 		time.Sleep(1 * time.Second)
 		stopped = true
 		fmt.Println("ok")
