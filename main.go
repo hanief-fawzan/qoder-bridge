@@ -931,50 +931,69 @@ func runDaemonize(args []string) {
 }
 
 func runStop(args []string) {
-	pid, err := readPID()
-	if err != nil {
-		fmt.Println("qoder-bridge is not running (no PID file)")
-		os.Exit(1)
-	}
-
-	if !isRunning(pid) {
-		fmt.Printf("qoder-bridge is not running (stale PID %d)\n", pid)
-		removePID()
-		os.Exit(1)
-	}
-
-	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil {
-		fmt.Fprintf(os.Stderr, "cannot stop PID %d: %v\n", pid, err)
-		os.Exit(1)
-	}
-
-	for i := 0; i < 30; i++ {
-		time.Sleep(100 * time.Millisecond)
-		if !isRunning(pid) {
-			break
+	// Try PID file first (daemon mode)
+	if pid, err := readPID(); err == nil && isRunning(pid) {
+		if err := syscall.Kill(pid, syscall.SIGTERM); err != nil {
+			fmt.Fprintf(os.Stderr, "cannot stop PID %d: %v\n", pid, err)
+			os.Exit(1)
 		}
+		for i := 0; i < 30; i++ {
+			time.Sleep(100 * time.Millisecond)
+			if !isRunning(pid) {
+				break
+			}
+		}
+		removePID()
+		fmt.Printf("qoder-bridge stopped (PID %d)\n", pid)
+		return
 	}
 
+	// Try systemd (system or user)
+	if err := exec.Command("systemctl", "stop", "qoder-bridge").Run(); err == nil {
+		fmt.Println("qoder-bridge stopped (systemd)")
+		return
+	}
+	if err := exec.Command("systemctl", "--user", "stop", "qoder-bridge").Run(); err == nil {
+		fmt.Println("qoder-bridge stopped (systemd user)")
+		return
+	}
+
+	// Clean stale PID
 	removePID()
-	fmt.Printf("qoder-bridge stopped (PID %d)\n", pid)
+	fmt.Println("qoder-bridge is not running")
+	os.Exit(1)
 }
 
 func runStatus(args []string) {
-	pid, err := readPID()
-	if err != nil {
-		fmt.Println("qoder-bridge is not running")
+	// Try PID file first (daemon mode)
+	if pid, err := readPID(); err == nil && isRunning(pid) {
+		fmt.Printf("qoder-bridge is running (PID %d)\n", pid)
+		fmt.Printf("  logs:   tail -f %s\n", logFilePath())
+		fmt.Printf("  stop:   qoder-bridge stop\n")
 		return
 	}
 
-	if !isRunning(pid) {
-		fmt.Printf("qoder-bridge is not running (stale PID %d)\n", pid)
-		removePID()
+	// Try systemd (system)
+	out, err := exec.Command("systemctl", "is-active", "qoder-bridge").CombinedOutput()
+	if err == nil && strings.TrimSpace(string(out)) == "active" {
+		fmt.Println("qoder-bridge is running (systemd)")
+		fmt.Printf("  logs:   journalctl -u qoder-bridge -f\n")
+		fmt.Printf("  stop:   qoder-bridge stop\n")
 		return
 	}
 
-	fmt.Printf("qoder-bridge is running (PID %d)\n", pid)
-	fmt.Printf("  logs:   tail -f %s\n", logFilePath())
-	fmt.Printf("  stop:   qoder-bridge stop\n")
+	// Try systemd (user)
+	out, err = exec.Command("systemctl", "--user", "is-active", "qoder-bridge").CombinedOutput()
+	if err == nil && strings.TrimSpace(string(out)) == "active" {
+		fmt.Println("qoder-bridge is running (systemd user)")
+		fmt.Printf("  logs:   journalctl --user -u qoder-bridge -f\n")
+		fmt.Printf("  stop:   qoder-bridge stop\n")
+		return
+	}
+
+	// Clean stale PID
+	removePID()
+	fmt.Println("qoder-bridge is not running")
 }
 
 func runUpdate(args []string) {

@@ -1,12 +1,10 @@
 #!/bin/bash
-# install.sh — Install qoder-bridge as a systemd user service
+# install.sh — Install qoder-bridge as a systemd service
 # Run: bash install.sh
 set -e
 
 BRIDGE_DIR="$(cd "$(dirname "$0")" && pwd)"
 BIN="$HOME/.local/bin/qoder-bridge"
-SERVICE_DIR="$HOME/.config/systemd/user"
-SERVICE_FILE="$SERVICE_DIR/qoder-bridge.service"
 
 echo "Installing qoder-bridge..."
 
@@ -38,10 +36,56 @@ if [ ! -f "$BRIDGE_DIR/.env" ]; then
     echo "  EDIT $BRIDGE_DIR/.env AND ADD YOUR PATs!"
 fi
 
-# Create systemd service
-echo "  creating systemd service..."
-mkdir -p "$SERVICE_DIR"
-cat > "$SERVICE_FILE" << EOF
+# Detect root vs normal user
+if [ "$(id -u)" -eq 0 ]; then
+    # Root: use system-level service
+    SERVICE_DIR="/etc/systemd/system"
+    SERVICE_FILE="$SERVICE_DIR/qoder-bridge.service"
+    echo "  creating system service (root)..."
+
+    cat > "$SERVICE_FILE" << EOF
+[Unit]
+Description=Qoder Bridge — OpenAI-compatible proxy for Qoder PATs
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=$BIN run -env $BRIDGE_DIR/.env
+Restart=on-failure
+RestartSec=5
+WorkingDirectory=$BRIDGE_DIR
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    systemctl daemon-reload
+    systemctl enable qoder-bridge
+    systemctl restart qoder-bridge
+
+    sleep 3
+
+    if systemctl is-active --quiet qoder-bridge; then
+        echo ""
+        echo "qoder-bridge installed and running!"
+        echo "  port:    127.0.0.1:$PORT"
+        echo "  status:  qoder-bridge status"
+        echo "  logs:    journalctl -u qoder-bridge -f"
+        echo "  stop:    qoder-bridge stop"
+        echo "  update:  qoder-bridge update"
+    else
+        echo ""
+        echo "qoder-bridge failed to start. Check logs:"
+        echo "  journalctl -u qoder-bridge --since '30 sec ago'"
+    fi
+else
+    # Normal user: use user-level service
+    SERVICE_DIR="$HOME/.config/systemd/user"
+    SERVICE_FILE="$SERVICE_DIR/qoder-bridge.service"
+    echo "  creating user service..."
+
+    mkdir -p "$SERVICE_DIR"
+    cat > "$SERVICE_FILE" << EOF
 [Unit]
 Description=Qoder Bridge — OpenAI-compatible proxy for Qoder PATs
 After=network.target
@@ -57,23 +101,23 @@ WorkingDirectory=$BRIDGE_DIR
 WantedBy=default.target
 EOF
 
-# Enable and start
-systemctl --user daemon-reload
-systemctl --user enable qoder-bridge
-systemctl --user restart qoder-bridge
+    systemctl --user daemon-reload
+    systemctl --user enable qoder-bridge
+    systemctl --user restart qoder-bridge
 
-sleep 3
+    sleep 3
 
-if systemctl --user is-active --quiet qoder-bridge; then
-    echo ""
-    echo "qoder-bridge installed and running!"
-    echo "  port:    127.0.0.1:$PORT"
-    echo "  status:  qoder-bridge status"
-    echo "  logs:    journalctl --user -u qoder-bridge -f"
-    echo "  stop:    qoder-bridge stop"
-    echo "  update:  qoder-bridge update"
-else
-    echo ""
-    echo "qoder-bridge failed to start. Check logs:"
-    echo "  journalctl --user -u qoder-bridge --since '30 sec ago'"
+    if systemctl --user is-active --quiet qoder-bridge; then
+        echo ""
+        echo "qoder-bridge installed and running!"
+        echo "  port:    127.0.0.1:$PORT"
+        echo "  status:  qoder-bridge status"
+        echo "  logs:    journalctl --user -u qoder-bridge -f"
+        echo "  stop:    qoder-bridge stop"
+        echo "  update:  qoder-bridge update"
+    else
+        echo ""
+        echo "qoder-bridge failed to start. Check logs:"
+        echo "  journalctl --user -u qoder-bridge --since '30 sec ago'"
+    fi
 fi
