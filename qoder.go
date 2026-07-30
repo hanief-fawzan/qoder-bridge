@@ -493,7 +493,7 @@ func buildQoderRequestBody(modelKey string, messages []ChatMessage, maxTokens in
 	recordID := stableChatRecordID(modelKey, messages, maxTokens)
 
 	if maxTokens <= 0 {
-		maxTokens = 32768
+		maxTokens = 65536
 	}
 	if mc.MaxOutputTokens > 0 && mc.MaxOutputTokens < maxTokens {
 		maxTokens = mc.MaxOutputTokens
@@ -587,7 +587,7 @@ func callQoder(ctx context.Context, pat, modelKey string, messages []ChatMessage
 		return nil, fmt.Errorf("cosy sign: %w", err)
 	}
 
-	// 5. Send request
+	// 5. Send request (retry with different proxy on network error)
 	req, err := http.NewRequestWithContext(ctx, "POST", qoderChatURL, bytes.NewReader(encodedBody))
 	if err != nil {
 		return nil, err
@@ -605,9 +605,25 @@ func callQoder(ctx context.Context, pat, modelKey string, messages []ChatMessage
 		req.Header.Set(k, v)
 	}
 
-	resp, err := proxyClientFn().Do(req)
+	var resp *http.Response
+	proxyRetries := len(proxyPool)
+	if proxyRetries < 1 {
+		proxyRetries = 1
+	}
+	if proxyRetries > 3 {
+		proxyRetries = 3
+	}
+	for attempt := 0; attempt < proxyRetries; attempt++ {
+		resp, err = proxyClientFn().Do(req)
+		if err == nil {
+			break
+		}
+		if attempt+1 < proxyRetries {
+			log.Printf("proxy retry %d/%d: %v", attempt+1, proxyRetries, err)
+		}
+	}
 	if err != nil {
-		return nil, fmt.Errorf("request: %w", err)
+		return nil, fmt.Errorf("request (after %d proxy attempts): %w", proxyRetries, err)
 	}
 	defer resp.Body.Close()
 
@@ -640,7 +656,10 @@ func unwrapQoderSSE(body io.Reader, onChunk StreamCallback) (string, error) {
 			continue
 		}
 		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
-		if data == "[DONE]" || data == "" {
+		if data == "" {
+			continue // keep-alive, not end-of-stream
+		}
+		if data == "[DONE]" {
 			break
 		}
 
@@ -658,7 +677,10 @@ func unwrapQoderSSE(body io.Reader, onChunk StreamCallback) (string, error) {
 		}
 
 		inner := envelope.Body
-		if inner == "" || inner == "[DONE]" {
+		if inner == "" {
+			continue // empty body = no-op chunk (keep-alive/metadata), not end
+		}
+		if inner == "[DONE]" {
 			break
 		}
 

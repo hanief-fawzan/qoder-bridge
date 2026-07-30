@@ -416,32 +416,38 @@ func handleNonStream(w http.ResponseWriter, r *http.Request, req ChatRequest, mo
 // ── Combo handlers ──────────────────────────────────────────────────────────
 
 func handleComboNonStream(w http.ResponseWriter, r *http.Request, req ChatRequest, comboName string, modelList []string) {
+	const maxRounds = 3
 	var lastErr error
-	for _, model := range modelList {
-		modelKey := resolveModelKey(model)
-		if !knownModelKeys[modelKey] {
-			log.Printf("combo %q: model %q not in known list, trying anyway", comboName, model)
-		}
-		log.Printf("combo %q: trying qd/%s", comboName, modelKey)
-
-		result, err := runWithPATRotation(r.Context(), patPool, modelKey, req.Messages, req.MaxTokens, nil, req.Tools, req.ThinkingEffort, req.ContextWindow)
-		if err == nil {
-			resp := ChatResponse{
-				ID:      "chatcmpl-" + uuidString(),
-				Object:  "chat.completion",
-				Created: time.Now().Unix(),
-				Model:   comboName,
-				Choices: []Choice{{Index: 0, Message: &Message{Role: "assistant", Content: result}, FinishReason: "stop"}},
-				Usage:   Usage{},
+	for round := 0; round < maxRounds; round++ {
+		for _, model := range modelList {
+			modelKey := resolveModelKey(model)
+			if !knownModelKeys[modelKey] {
+				log.Printf("combo %q: model %q not in known list, trying anyway", comboName, model)
 			}
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(resp)
-			return
+			log.Printf("combo %q: round %d, trying qd/%s", comboName, round+1, modelKey)
+
+			result, err := runWithPATRotation(r.Context(), patPool, modelKey, req.Messages, req.MaxTokens, nil, req.Tools, req.ThinkingEffort, req.ContextWindow)
+			if err == nil {
+				resp := ChatResponse{
+					ID:      "chatcmpl-" + uuidString(),
+					Object:  "chat.completion",
+					Created: time.Now().Unix(),
+					Model:   comboName,
+					Choices: []Choice{{Index: 0, Message: &Message{Role: "assistant", Content: result}, FinishReason: "stop"}},
+					Usage:   Usage{},
+				}
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(resp)
+				return
+			}
+			lastErr = err
+			log.Printf("combo %q: qd/%s failed: %v", comboName, modelKey, err)
 		}
-		lastErr = err
-		log.Printf("combo %q: qd/%s failed: %v", comboName, modelKey, err)
+		if round+1 < maxRounds {
+			log.Printf("combo %q: round %d complete, all models failed, starting round %d", comboName, round+1, round+2)
+		}
 	}
-	forwardUpstreamError(w, fmt.Errorf("combo %s: all models failed, last: %w", comboName, lastErr))
+	forwardUpstreamError(w, fmt.Errorf("combo %s: all %d rounds exhausted, last: %w", comboName, maxRounds, lastErr))
 }
 
 func handleComboStream(w http.ResponseWriter, r *http.Request, req ChatRequest, comboName string, modelList []string) {
@@ -453,53 +459,67 @@ func handleComboStream(w http.ResponseWriter, r *http.Request, req ChatRequest, 
 	id := "chatcmpl-" + uuidString()
 	created := time.Now().Unix()
 
+	const maxRounds = 3
 	var lastErr error
-	for _, model := range modelList {
-		modelKey := resolveModelKey(model)
-		if !knownModelKeys[modelKey] {
-			log.Printf("combo %q: model %q not in known list, trying anyway", comboName, model)
-		}
-		log.Printf("combo %q: trying qd/%s", comboName, modelKey)
+	roleSent := false
+	for round := 0; round < maxRounds; round++ {
+		for _, model := range modelList {
+			modelKey := resolveModelKey(model)
+			if !knownModelKeys[modelKey] {
+				log.Printf("combo %q: model %q not in known list, trying anyway", comboName, model)
+			}
+			log.Printf("combo %q: round %d, trying qd/%s", comboName, round+1, modelKey)
 
-		first := true
-		result, err := runWithPATRotation(r.Context(), patPool, modelKey, req.Messages, req.MaxTokens, func(text string) {
-			if first {
+			first := true
+			result, err := runWithPATRotation(r.Context(), patPool, modelKey, req.Messages, req.MaxTokens, func(text string) {
+				if first {
+					if flusher != nil && !roleSent {
+						sendSSE(w, flusher, SSEChunk{
+							ID: id, Object: "chat.completion.chunk", Created: created, Model: comboName,
+							Choices: []SSEChoice{{Index: 0, Delta: json.RawMessage(`{"role":"assistant","content":""}`)}},
+						})
+						roleSent = true
+					}
+					first = false
+				}
 				if flusher != nil {
 					sendSSE(w, flusher, SSEChunk{
 						ID: id, Object: "chat.completion.chunk", Created: created, Model: comboName,
-						Choices: []SSEChoice{{Index: 0, Delta: json.RawMessage(`{"role":"assistant","content":""}`)}},
+						Choices: []SSEChoice{{Index: 0, Delta: json.RawMessage(`{"content":` + mustQuote(text) + `}`)}},
 					})
 				}
-				first = false
-			}
-			if flusher != nil {
-				sendSSE(w, flusher, SSEChunk{
-					ID: id, Object: "chat.completion.chunk", Created: created, Model: comboName,
-					Choices: []SSEChoice{{Index: 0, Delta: json.RawMessage(`{"content":` + mustQuote(text) + `}`)}},
-				})
-			}
-		}, req.Tools, req.ThinkingEffort, req.ContextWindow)
+			}, req.Tools, req.ThinkingEffort, req.ContextWindow)
 
-		if err == nil {
-			_ = result
-			if flusher != nil {
-				stop := "stop"
-				sendSSE(w, flusher, SSEChunk{
-					ID: id, Object: "chat.completion.chunk", Created: created, Model: comboName,
-					Choices: []SSEChoice{{Index: 0, Delta: json.RawMessage(`{}`), FinishReason: &stop}},
-				})
-				fmt.Fprintf(w, "data: [DONE]\n\n")
-				flusher.Flush()
+			if err == nil {
+				_ = result
+				if flusher != nil {
+					stop := "stop"
+					sendSSE(w, flusher, SSEChunk{
+						ID: id, Object: "chat.completion.chunk", Created: created, Model: comboName,
+						Choices: []SSEChoice{{Index: 0, Delta: json.RawMessage(`{}`), FinishReason: &stop}},
+					})
+					fmt.Fprintf(w, "data: [DONE]\n\n")
+					flusher.Flush()
+				}
+				return
 			}
-			return
+			lastErr = err
+			log.Printf("combo %q: qd/%s failed: %v", comboName, modelKey, err)
 		}
-		lastErr = err
-		log.Printf("combo %q: qd/%s failed: %v", comboName, modelKey, err)
+		if round+1 < maxRounds {
+			log.Printf("combo %q: round %d complete, all models failed, starting round %d", comboName, round+1, round+2)
+		}
 	}
 
-	// All models failed
+	// All models failed across all rounds
 	if flusher != nil {
-		errMsg := fmt.Sprintf("\n\n[Error: combo %s: all models failed, last: %s]", comboName, lastErr)
+		errMsg := fmt.Sprintf("\n\n[Error: combo %s: all %d rounds exhausted, last: %s]", comboName, maxRounds, lastErr)
+		if !roleSent {
+			sendSSE(w, flusher, SSEChunk{
+				ID: id, Object: "chat.completion.chunk", Created: created, Model: comboName,
+				Choices: []SSEChoice{{Index: 0, Delta: json.RawMessage(`{"role":"assistant","content":""}`)}},
+			})
+		}
 		sendSSE(w, flusher, SSEChunk{
 			ID: id, Object: "chat.completion.chunk", Created: created, Model: comboName,
 			Choices: []SSEChoice{{Index: 0, Delta: json.RawMessage(`{"content":` + mustQuote(errMsg) + `}`)}},
@@ -545,28 +565,42 @@ func runWithPATRotation(ctx context.Context, pool *PATPool, modelKey string, mes
 		}
 	}
 
-	// Try up to pool.Len() PATs on auth/queue errors (full rotation)
+	// Try up to pool.Len() PATs, 3 rounds max
 	maxAttempts := pool.Len()
 	if maxAttempts < 1 {
 		maxAttempts = 1
 	}
+	const maxRounds = 3
 
 	var result *ChatResult
 	var lastErr error
 	var pat string
-	for attempt := 0; attempt < maxAttempts; attempt++ {
-		pat = pool.Next()
-		result, lastErr = callQoder(ctx, pat, modelKey, messages, maxTokens, onChunk, tools, thinkingEffort, contextWindow)
-		if lastErr == nil {
-			break
+	totalAttempts := 0
+	for round := 0; round < maxRounds; round++ {
+		for attempt := 0; attempt < maxAttempts; attempt++ {
+			totalAttempts++
+			pat = pool.Next()
+			result, lastErr = callQoder(ctx, pat, modelKey, messages, maxTokens, onChunk, tools, thinkingEffort, contextWindow)
+			if lastErr == nil && result != nil && strings.TrimSpace(result.Text) != "" {
+				// Success with non-empty response
+				goto done
+			}
+			if lastErr == nil && (result == nil || strings.TrimSpace(result.Text) == "") {
+				lastErr = fmt.Errorf("empty response from upstream")
+				log.Printf("qd %s: empty response (pat: %s, attempt %d)", modelKey, maskPAT(pat), totalAttempts)
+			} else {
+				log.Printf("qd %s error: %v (pat: %s, attempt %d)", modelKey, lastErr, maskPAT(pat), totalAttempts)
+			}
+			if ctx.Err() != nil {
+				lastErr = ctx.Err()
+				goto done
+			}
 		}
-		log.Printf("qd %s error: %v (pat: %s, attempt %d/%d)", modelKey, lastErr, maskPAT(pat), attempt+1, maxAttempts)
-		if (isAuthError(lastErr) || isQueueError(lastErr)) && attempt+1 < maxAttempts {
-			log.Printf("pat rotation: retrying with next PAT...")
-			continue
+		if round+1 < maxRounds {
+			log.Printf("qd %s: round %d complete, all PATs failed, starting round %d", modelKey, round+1, round+2)
 		}
-		break // non-retryable error or last attempt
 	}
+done:
 
 	// Log to DB
 	latency := time.Since(start).Milliseconds()
