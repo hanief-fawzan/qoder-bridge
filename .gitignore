@@ -4,3 +4,4 @@ qoder-bridge
 data/
 *.log
 *.tmp
+dist/
