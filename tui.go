@@ -640,23 +640,36 @@ func tuiRunUpdate() string {
 
 func tuiDoRestart() string {
 	var sb strings.Builder
-	exe := bridgeExe()
 
-	// Stop via subprocess (don't call runStop — it calls os.Exit)
+	// Try systemd restart first (install.sh sets up systemd service)
+	for _, svc := range [][]string{
+		{"systemctl", "restart", "qoder-bridge"},
+		{"systemctl", "--user", "restart", "qoder-bridge"},
+	} {
+		_, err := exec.Command(svc[0], svc[1:]...).CombinedOutput()
+		if err == nil {
+			time.Sleep(2 * time.Second)
+			statusOut, _ := exec.Command(svc[0], "is-active", "qoder-bridge").CombinedOutput()
+			if strings.TrimSpace(string(statusOut)) == "active" {
+				sb.WriteString(fmt.Sprintf("✅ Bridge restarted (systemd: %s)\n", svc[0]))
+				return sb.String()
+			}
+		}
+	}
+
+	// Fallback: manual stop + start (PID-file daemon mode)
+	exe := bridgeExe()
 	cmd := exec.Command(exe, "stop")
 	out, _ := cmd.CombinedOutput()
 	sb.WriteString(fmt.Sprintf("stop: %s\n", strings.TrimSpace(string(out))))
 
-	// Small wait for port release
 	time.Sleep(500 * time.Millisecond)
 
-	// Start via subprocess
 	cmd = exec.Command(exe)
 	cmd.Dir = bridgeDir()
 	out, _ = cmd.CombinedOutput()
 	sb.WriteString(fmt.Sprintf("start: %s\n", strings.TrimSpace(string(out))))
 
-	// Wait for startup
 	time.Sleep(3 * time.Second)
 	sb.WriteString("✅ Bridge restarted!\n")
 	return sb.String()

@@ -273,6 +273,30 @@ Prefix is **case-insensitive** — `QD/Auto`, `qd/AUTO`, `Qd/auto` all work.
 | Combos | `GET /v1/combos` |
 | Health | `GET /health` |
 
+### Health check
+
+```bash
+curl http://127.0.0.1:7100/health
+```
+
+### List models
+
+```bash
+curl http://127.0.0.1:7100/v1/models
+```
+
+### List combos
+
+```bash
+curl http://127.0.0.1:7100/v1/combos
+```
+
+### Check quota
+
+```bash
+curl http://127.0.0.1:7100/v1/quota
+```
+
 ### Chat (streaming)
 
 ```bash
