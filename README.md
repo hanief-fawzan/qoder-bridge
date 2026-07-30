@@ -89,7 +89,6 @@ QODER_PORT=7100
 # ── Combos (optional) ─────────────────────────────────
 COMBO_FAST=efficient,lite
 COMBO_SMART=ultimate,Kimi-K3,DeepSeek-V4-Pro
-COMBO_QODER_PRIMARY=Kimi-K3,GLM-5.2,Qwen3.8-Max-Preview,efficient
 ```
 
 Everything else (API key, proxy, delay, PAT strategy) is managed via TUI:
@@ -333,7 +332,6 @@ Fallback chains — try first model, on error try next:
 ```env
 COMBO_FAST=efficient,lite
 COMBO_SMART=ultimate,Kimi-K3,DeepSeek-V4-Pro
-COMBO_QODER_PRIMARY=Kimi-K3,GLM-5.2,Qwen3.8-Max-Preview,efficient
 ```
 
 Use: `"model": "qd/combo-fast"` or `"model": "combo-fast"`
@@ -391,3 +389,9 @@ Requires **Go 1.21+**. Dependencies: `golang.org/x/net` (SOCKS5) + `modernc.org/
 ## 📜 License
 
 **MIT-0** (MIT No Attribution) — do whatever you want, no credit needed. See [LICENSE](LICENSE).
+
+---
+
+## 🙏 Credits
+
+COSY signing algorithm reverse-engineered from the Qoder ecosystem. Built for the community.
