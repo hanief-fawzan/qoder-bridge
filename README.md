@@ -86,12 +86,15 @@ pt-your-second-pat-here
 # ── Server ────────────────────────────────────────────
 QODER_PORT=7100
 
-# ── PAT rotation strategy ─────────────────────────────
-PAT_STRATEGY=round-robin
-
 # ── Combos (optional) ─────────────────────────────────
 COMBO_FAST=efficient,lite
 COMBO_SMART=ultimate,Kimi-K3,DeepSeek-V4-Pro
+COMBO_QODER_PRIMARY=Kimi-K3,GLM-5.2,Qwen3.8-Max-Preview,efficient
+```
+
+Everything else (API key, proxy, delay, PAT strategy) is managed via TUI:
+```bash
+qoder-bridge config
 ```
 
 ### Interactive TUI Config (`qoder-bridge config`)

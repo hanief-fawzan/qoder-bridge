@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
@@ -606,26 +607,25 @@ func tuiRunUpdate() string {
 
 func tuiDoRestart() string {
 	var sb strings.Builder
-
-	// Stop
 	exe := bridgeExe()
-	cmd := exec.Command(exe, "stop")
-	out, err := cmd.CombinedOutput()
-	sb.WriteString(fmt.Sprintf("$ %s stop\n%s\n", exe, string(out)))
-	if err != nil {
-		sb.WriteString(fmt.Sprintf("(stop: %v — may not be running)\n", err))
-	}
 
-	// Start
+	// Stop via subprocess (don't call runStop — it calls os.Exit)
+	cmd := exec.Command(exe, "stop")
+	out, _ := cmd.CombinedOutput()
+	sb.WriteString(fmt.Sprintf("stop: %s\n", strings.TrimSpace(string(out))))
+
+	// Small wait for port release
+	time.Sleep(500 * time.Millisecond)
+
+	// Start via subprocess
 	cmd = exec.Command(exe)
 	cmd.Dir = bridgeDir()
-	out, err = cmd.CombinedOutput()
-	sb.WriteString(fmt.Sprintf("$ %s\n%s\n", exe, string(out)))
-	if err != nil {
-		sb.WriteString(fmt.Sprintf("Restart error: %v\n", err))
-	} else {
-		sb.WriteString("✅ Bridge restarted!\n")
-	}
+	out, _ = cmd.CombinedOutput()
+	sb.WriteString(fmt.Sprintf("start: %s\n", strings.TrimSpace(string(out))))
+
+	// Wait for startup
+	time.Sleep(3 * time.Second)
+	sb.WriteString("✅ Bridge restarted!\n")
 	return sb.String()
 }
 
