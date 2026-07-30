@@ -355,11 +355,19 @@ func normalizeMessages(messages []ChatMessage) ([]ChatMessage, string) {
 	var systemParts []string
 	var out []ChatMessage
 	for _, m := range messages {
+		// Skip tool role messages — Qoder doesn't support tool calling
+		if m.Role == "tool" {
+			continue
+		}
 		text := extractText(m.Content)
 		if m.Role == "system" {
 			if text != "" {
 				systemParts = append(systemParts, text)
 			}
+			continue
+		}
+		// Skip empty assistant messages (tool_calls-only messages have no text)
+		if m.Role == "assistant" && text == "" {
 			continue
 		}
 		out = append(out, ChatMessage{Role: m.Role, Content: text})
