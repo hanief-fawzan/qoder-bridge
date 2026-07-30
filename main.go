@@ -38,11 +38,12 @@ import (
 // ── Config ──────────────────────────────────────────────────────────────────
 
 var (
-	port    int
-	pats    []string
-	patPool *PATPool
-	combos  map[string][]string // combo name -> model list
-	apiKey  string              // optional: sk-* API key for auth
+	port         int
+	pats         []string
+	patPool      *PATPool
+	combos       map[string][]string // combo name -> model list
+	apiKey       string              // optional: sk-* API key for auth
+	requestDelay int                 // max random delay in ms (0 = disabled)
 )
 
 // ── Models ──────────────────────────────────────────────────────────────────
@@ -473,6 +474,12 @@ func handleQuota(w http.ResponseWriter, r *http.Request) {
 // ── PAT rotation ────────────────────────────────────────────────────────────
 
 func runWithPATRotation(ctx context.Context, pool *PATPool, modelKey string, messages []ChatMessage, maxTokens int, onChunk StreamCallback) (string, error) {
+	// Smart anti-ban delay: random jitter between 0 and requestDelay ms
+	if requestDelay > 0 {
+		n, _ := rand.Int(rand.Reader, big.NewInt(int64(requestDelay)))
+		time.Sleep(time.Duration(n.Int64()) * time.Millisecond)
+	}
+
 	pat := pool.Next()
 
 	result, err := callQoder(ctx, pat, modelKey, messages, maxTokens, onChunk)
@@ -561,11 +568,12 @@ func sendSSE(w http.ResponseWriter, f http.Flusher, chunk SSEChunk) {
 // ── .env loader ─────────────────────────────────────────────────────────────
 
 type envConfig struct {
-	pats     []string
-	port     int
-	strategy string
-	combos   map[string][]string
-	apiKey   string // optional: sk-* API key for auth
+	pats         []string
+	port         int
+	strategy     string
+	combos       map[string][]string
+	apiKey       string // optional: sk-* API key for auth
+	requestDelay int    // max random delay in ms between requests (0 = disabled)
 }
 
 func loadEnv(envPath string) *envConfig {
@@ -647,6 +655,12 @@ func loadEnv(envPath string) *envConfig {
 		case key == "QODER_API_KEY":
 			if val != "" {
 				cfg.apiKey = val
+			}
+
+		case key == "REQUEST_DELAY_MS":
+			var d int
+			if _, err := fmt.Sscanf(val, "%d", &d); err == nil && d > 0 {
+				cfg.requestDelay = d
 			}
 
 		case key == "QODER_PROXY":
@@ -774,6 +788,9 @@ func runServe(args []string) {
 	}
 	if cfg.apiKey != "" {
 		apiKey = cfg.apiKey
+	}
+	if cfg.requestDelay > 0 {
+		requestDelay = cfg.requestDelay
 	}
 
 	// Pre-warm credentials

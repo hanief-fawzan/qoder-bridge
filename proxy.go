@@ -1,6 +1,7 @@
 // proxy.go — Proxy-aware HTTP client for Qoder API.
 //
 // Supports: socks5://, socks5h://, http://, https:// proxy URLs.
+// Multi-proxy: comma-separated list rotates per request.
 // Reads from QODER_PROXY env, then HTTPS_PROXY, then ALL_PROXY.
 package main
 
@@ -8,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math/rand"
 	"net"
 	"net/http"
 	"net/url"
@@ -18,18 +20,14 @@ import (
 	"golang.org/x/net/proxy"
 )
 
-// proxyClient is the shared HTTP client with optional proxy support.
-// Initialized in main() after .env is loaded.
-var proxyClient *http.Client
+// proxyPool holds multiple HTTP clients for proxy rotation.
+var proxyPool []*http.Client
 
-// initProxyClient (re)builds the proxy-aware HTTP client from current env.
+// proxyLabels holds human-readable descriptions for logging.
+var proxyLabels []string
+
+// initProxyClient builds the proxy-aware HTTP clients from current env.
 func initProxyClient() {
-	proxyClient = buildProxyClient()
-}
-
-// buildProxyClient creates an HTTP Client that routes through a proxy if configured.
-// Priority: QODER_PROXY > HTTPS_PROXY > ALL_PROXY
-func buildProxyClient() *http.Client {
 	proxyURL := firstNonEmpty(
 		os.Getenv("QODER_PROXY"),
 		os.Getenv("HTTPS_PROXY"),
@@ -39,13 +37,42 @@ func buildProxyClient() *http.Client {
 	)
 
 	if proxyURL == "" {
-		return &http.Client{Timeout: 5 * time.Minute}
+		proxyPool = []*http.Client{{Timeout: 5 * time.Minute}}
+		proxyLabels = []string{"direct"}
+		return
 	}
 
+	// Split comma-separated proxies
+	entries := strings.Split(proxyURL, ",")
+	for _, entry := range entries {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		client, label := buildSingleProxyClient(entry)
+		proxyPool = append(proxyPool, client)
+		proxyLabels = append(proxyLabels, label)
+	}
+
+	if len(proxyPool) == 0 {
+		proxyPool = []*http.Client{{Timeout: 5 * time.Minute}}
+		proxyLabels = []string{"direct"}
+	}
+}
+
+// proxyClient returns a random proxy client from the pool.
+func proxyClientFn() *http.Client {
+	if len(proxyPool) == 0 {
+		return &http.Client{Timeout: 5 * time.Minute}
+	}
+	return proxyPool[rand.Intn(len(proxyPool))]
+}
+
+func buildSingleProxyClient(proxyURL string) (*http.Client, string) {
 	u, err := url.Parse(proxyURL)
 	if err != nil {
 		log.Printf("proxy: invalid URL %q: %v — using direct", proxyURL, err)
-		return &http.Client{Timeout: 5 * time.Minute}
+		return &http.Client{Timeout: 5 * time.Minute}, "direct"
 	}
 
 	switch u.Scheme {
@@ -55,11 +82,11 @@ func buildProxyClient() *http.Client {
 		return buildHTTPProxyClient(u)
 	default:
 		log.Printf("proxy: unsupported scheme %q — using direct", u.Scheme)
-		return &http.Client{Timeout: 5 * time.Minute}
+		return &http.Client{Timeout: 5 * time.Minute}, "direct"
 	}
 }
 
-func buildSocks5Client(u *url.URL) *http.Client {
+func buildSocks5Client(u *url.URL) (*http.Client, string) {
 	auth := &proxy.Auth{}
 	if u.User != nil {
 		auth.User = u.User.Username()
@@ -79,10 +106,14 @@ func buildSocks5Client(u *url.URL) *http.Client {
 	dialer, err := proxy.SOCKS5("tcp", host, auth, proxy.Direct)
 	if err != nil {
 		log.Printf("proxy: socks5 dialer error: %v — using direct", err)
-		return &http.Client{Timeout: 5 * time.Minute}
+		return &http.Client{Timeout: 5 * time.Minute}, "direct"
 	}
 
-	log.Printf("proxy: SOCKS5 %s", host)
+	label := fmt.Sprintf("socks5://%s", host)
+	if u.User != nil {
+		label = fmt.Sprintf("socks5://%s:***@%s", u.User.Username(), host)
+	}
+
 	return &http.Client{
 		Transport: &http.Transport{
 			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -90,17 +121,20 @@ func buildSocks5Client(u *url.URL) *http.Client {
 			},
 		},
 		Timeout: 5 * time.Minute,
-	}
+	}, label
 }
 
-func buildHTTPProxyClient(u *url.URL) *http.Client {
-	log.Printf("proxy: HTTP %s", u.Host)
+func buildHTTPProxyClient(u *url.URL) (*http.Client, string) {
+	label := fmt.Sprintf("%s://%s", u.Scheme, u.Host)
+	if u.User != nil {
+		label = fmt.Sprintf("%s://%s:***@%s", u.Scheme, u.User.Username(), u.Host)
+	}
 	return &http.Client{
 		Transport: &http.Transport{
 			Proxy: http.ProxyURL(u),
 		},
 		Timeout: 5 * time.Minute,
-	}
+	}, label
 }
 
 func firstNonEmpty(vals ...string) string {
@@ -119,22 +153,11 @@ type contextDialer interface {
 
 // getProxyInfo returns a human-readable proxy description for logging.
 func getProxyInfo() string {
-	proxyURL := firstNonEmpty(
-		os.Getenv("QODER_PROXY"),
-		os.Getenv("HTTPS_PROXY"),
-		os.Getenv("https_proxy"),
-		os.Getenv("ALL_PROXY"),
-		os.Getenv("all_proxy"),
-	)
-	if proxyURL == "" {
+	if len(proxyLabels) == 0 {
 		return "none (direct)"
 	}
-	u, err := url.Parse(proxyURL)
-	if err != nil {
-		return fmt.Sprintf("invalid (%s)", proxyURL)
+	if len(proxyLabels) == 1 {
+		return proxyLabels[0]
 	}
-	if u.User != nil {
-		return fmt.Sprintf("%s://%s:***@%s", u.Scheme, u.User.Username(), u.Host)
-	}
-	return fmt.Sprintf("%s://%s", u.Scheme, u.Host)
+	return fmt.Sprintf("%d proxies: %s", len(proxyLabels), strings.Join(proxyLabels, ", "))
 }

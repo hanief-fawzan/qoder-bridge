@@ -91,7 +91,7 @@ func exchangeJobToken(pat string) (string, time.Time, error) {
 
 	ctx, cancel := context.WithTimeout(req.Context(), 15*time.Second)
 	defer cancel()
-	resp, err := proxyClient.Do(req.WithContext(ctx))
+	resp, err := proxyClientFn().Do(req.WithContext(ctx))
 	if err != nil {
 		return "", time.Time{}, err
 	}
@@ -135,7 +135,7 @@ func fetchUserID(jobToken string) (string, error) {
 
 	ctx, cancel := context.WithTimeout(req.Context(), 10*time.Second)
 	defer cancel()
-	resp, err := proxyClient.Do(req.WithContext(ctx))
+	resp, err := proxyClientFn().Do(req.WithContext(ctx))
 	if err != nil {
 		return "", err
 	}
@@ -210,7 +210,7 @@ func fetchModelConfig(cred *patCredential, modelKey string, retry bool) (*modelC
 
 	ctx, cancel := context.WithTimeout(req.Context(), 15*time.Second)
 	defer cancel()
-	resp, err := proxyClient.Do(req.WithContext(ctx))
+	resp, err := proxyClientFn().Do(req.WithContext(ctx))
 	if err != nil {
 		return nil, err
 	}
@@ -313,7 +313,7 @@ func fetchQuota(pat string) QuotaInfo {
 
 	ctx, cancel := context.WithTimeout(req.Context(), 10*time.Second)
 	defer cancel()
-	resp, err := proxyClient.Do(req.WithContext(ctx))
+	resp, err := proxyClientFn().Do(req.WithContext(ctx))
 	if err != nil {
 		return QuotaInfo{PAT: maskPAT(pat), Error: err.Error()}
 	}
@@ -552,7 +552,7 @@ func callQoder(ctx context.Context, pat, modelKey string, messages []ChatMessage
 		req.Header.Set(k, v)
 	}
 
-	resp, err := proxyClient.Do(req)
+	resp, err := proxyClientFn().Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("request: %w", err)
 	}

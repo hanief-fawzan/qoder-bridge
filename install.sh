@@ -10,6 +10,16 @@ SERVICE_FILE="$SERVICE_DIR/qoder-bridge.service"
 
 echo "Installing qoder-bridge..."
 
+# Read port from .env (default 7100)
+PORT=7100
+if [ -f "$BRIDGE_DIR/.env" ]; then
+    ENV_PORT=$(grep -E "^QODER_PORT=" "$BRIDGE_DIR/.env" | cut -d= -f2 | tr -d ' "')
+    if [ -n "$ENV_PORT" ]; then
+        PORT="$ENV_PORT"
+    fi
+fi
+echo "  port: $PORT"
+
 # Build
 echo "  building..."
 cd "$BRIDGE_DIR"
@@ -57,7 +67,7 @@ sleep 3
 if systemctl --user is-active --quiet qoder-bridge; then
     echo ""
     echo "qoder-bridge installed and running!"
-    echo ""
+    echo "  port:    127.0.0.1:$PORT"
     echo "  status:  qoder-bridge status"
     echo "  logs:    journalctl --user -u qoder-bridge -f"
     echo "  stop:    qoder-bridge stop"

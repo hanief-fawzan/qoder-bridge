@@ -58,7 +58,7 @@ That's it. Bridge is live on `http://127.0.0.1:7100` running in background.
 
 ```
 qoder-bridge started (PID 12345)
-  logs:    tail -f /home/user/.qoder-bridge.log
+  logs:    tail -f ~/.qoder-bridge.log
   stop:    qoder-bridge stop
   status:  qoder-bridge status
 ```
@@ -89,7 +89,7 @@ qoder-bridge started (PID 12345)
 
 ## ⚙️ Configuration
 
-All config is via `.env` file.
+All config is via `.env` file. See [`.env.example`](.env.example) for full reference.
 
 ```env
 # ── Qoder PATs (required) ──────────────────────────
@@ -112,6 +112,12 @@ PAT_STRATEGY=round-robin
 # Recommended when exposing via Caddy/domain.
 #QODER_API_KEY=sk-your-secret-key-here
 
+# ── Anti-ban: Random request delay (optional) ───────
+# Adds random jitter (0 to N ms) before each API request.
+# Helps avoid rate limits when sending many requests.
+# Set to 0 or omit to disable.
+#REQUEST_DELAY_MS=1000
+
 # ── Combos (optional) ───────────────────────────────
 # Format: COMBO_<NAME>=model1,model2,model3
 # First model is primary. On error, tries the next.
@@ -127,7 +133,12 @@ PAT_STRATEGY=round-robin
 # Route all API traffic through a proxy.
 # Supports: socks5://, socks5h://, http://, https://
 # Priority: QODER_PROXY > HTTPS_PROXY > ALL_PROXY
+#
+# Single proxy:
 #QODER_PROXY=socks5://user:pass@127.0.0.1:1080
+#
+# Multi-proxy (comma-separated, rotates randomly per request):
+#QODER_PROXY=socks5://a:pass1@1.2.3.4:1080,socks5://b:pass2@5.6.7.8:1080
 ```
 
 ---
@@ -278,14 +289,19 @@ If **all models fail**, returns the last error. Unknown model names are still tr
 Route all Qoder API traffic through a proxy. Supports `socks5://`, `socks5h://`, `http://`, `https://`.
 
 ```env
-# SOCKS5 proxy (e.g., MicroWARP, Cloudflare WARP)
+# Single proxy
 QODER_PROXY=socks5://user:pass@127.0.0.1:1080
 
 # HTTP proxy
 QODER_PROXY=http://127.0.0.1:8080
+
+# Multi-proxy (comma-separated, rotates randomly per request)
+QODER_PROXY=socks5://a:pass1@1.2.3.4:1080,socks5://b:pass2@5.6.7.8:1080
 ```
 
 **Env priority:** `QODER_PROXY` > `HTTPS_PROXY` > `ALL_PROXY`
+
+Multi-proxy rotates randomly across all configured proxies on each request. Useful for distributing load across multiple egress IPs.
 
 ---
 
@@ -463,3 +479,9 @@ Check if port is in use: `ss -tlnp | grep 7100`
 ## 📜 License
 
 **MIT-0** (MIT No Attribution) — do whatever you want, no credit needed. See [LICENSE](LICENSE).
+
+---
+
+## 🙏 Credits
+
+- **[9router](https://github.com/luqman-v1/9router-go)** — Reference implementation for COSY signing protocol and WAF encoding algorithm. qoder-bridge reimplements the signing logic in pure Go based on the 9router JavaScript source.
