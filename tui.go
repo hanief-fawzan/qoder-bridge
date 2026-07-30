@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
+	"os/exec"
 	"strings"
 
 	"github.com/gdamore/tcell/v2"
@@ -13,224 +14,362 @@ import (
 )
 
 var (
-	tuiApp  *tview.Application
-	tuiPages *tview.Pages
+	app     *tview.Application
+	pages   *tview.Pages
+	envData *envConfig
 )
 
 // runConfigTUI launches the interactive config TUI.
-func runConfigTUI() {
-	tuiApp = tview.NewApplication()
-	tuiPages = tview.NewPages()
+func runConfigTUI(cfg *envConfig) {
+	envData = cfg
+	app = tview.NewApplication()
+	pages = tview.NewPages()
 
-	// Global Esc handler — ALWAYS works regardless of focused widget
-	tuiApp.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
-		if event.Key() == tcell.KeyEscape {
-			tuiGoBack()
-			return nil
-		}
-		return event
-	})
+	app.SetRoot(pages, true)
 
-	mainMenu := tuiMainMenu()
-	tuiPages.AddPage("main", mainMenu, true, true)
+	// Main menu
+	pages.AddAndSwitchToPage("main", mainMenu(), true)
 
-	tuiApp.SetRoot(tuiPages, true)
-	if err := tuiApp.Run(); err != nil {
+	if err := app.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "tui error: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-// tuiGoBack pops the current page back to main.
-func tuiGoBack() {
-	name, _ := tuiPages.GetFrontPage()
-	if name == "main" {
-		tuiApp.Stop()
-		return
-	}
-	tuiPages.RemovePage(name)
+// pushPage adds a named sub-page and switches to it.
+func pushPage(name string, page tview.Primitive) {
+	pages.AddAndSwitchToPage(name, page, true)
 }
 
-// tuiPush switches to a named sub-page. Esc will pop it.
-func tuiPush(name string, p tview.Primitive) {
-	tuiPages.AddAndSwitchToPage(name, p, true)
+// goBack removes the current page (reveals previous or main).
+func goBack() {
+	name, _ := pages.GetFrontPage()
+	if name == "main" {
+		app.Stop()
+		return
+	}
+	pages.RemovePage(name)
 }
+
+// setEscape wires Esc on a primitive to call goBack.
+func setEscape(p tview.Primitive) tview.Primitive {
+	if f, ok := p.(*tview.Form); ok {
+		f.SetCancelFunc(func() { goBack() })
+		return p
+	}
+	return p
+}
+
+// ── Styles ────────────────────────────────────────────────────────────────
+
+const (
+	colorTitle  = "[#5f87ff]"
+	colorKey    = "[#ffaf00]"
+	colorGreen  = "[#5faf5f]"
+	colorRed    = "[#ff5f5f]"
+	colorDim    = "[#808080]"
+	colorReset  = "[white]"
+	colorAccent = "[#00afdf]"
+)
 
 // ── Main Menu ─────────────────────────────────────────────────────────────
 
-func tuiMainMenu() *tview.List {
-	l := tview.NewList().
-		AddItem("🔑  API Keys", "Generate, enable/disable, view keys", 'a', func() {
-			tuiPush("apikey", tuiAPIKeyMenu())
+func mainMenu() tview.Primitive {
+	list := tview.NewList().
+		AddItem("  🔑  API Keys", "Generate, enable/disable, view", 'a', func() {
+			pushPage("sub", apiKeyMenu())
 		}).
-		AddItem("🌐  Proxy", "Set, view, or remove proxy", 'p', func() {
-			tuiPush("proxy", tuiProxyMenu())
+		AddItem("  🌐  Proxy", "Set, view, or remove proxy URL", 'p', func() {
+			pushPage("sub", proxyMenu())
 		}).
-		AddItem("⏱   Request Delay", "Anti-ban delay between requests", 'd', func() {
-			tuiPush("delay", tuiDelayMenu())
+		AddItem("  ⏱   Request Delay", "Anti-ban delay (0-N ms jitter)", 'd', func() {
+			pushPage("sub", delayMenu())
 		}).
-		AddItem("🔄  PAT Strategy", "round-robin or random selection", 's', func() {
-			tuiPush("strategy", tuiStrategyMenu())
+		AddItem("  🔄  PAT Strategy", "round-robin or random rotation", 's', func() {
+			pushPage("sub", strategyMenu())
 		}).
-		AddItem("📊  Usage", "Token & credit usage by period", 'u', func() {
-			tuiPush("usage", tuiUsageMenu())
+		AddItem("  📦  Import from .env", "Auto-detect & migrate .env → DB", 'i', func() {
+			pushPage("sub", importMenu())
 		}).
-		AddItem("📜  Logs", "Request logs with date filter", 'l', func() {
-			tuiPush("logs", tuiLogsMenu())
+		AddItem("  📊  Usage", "Token & credit usage by period", 'u', func() {
+			pushPage("sub", usageMenu())
 		}).
-		AddItem("📋  Show All Config", "View all current settings", 'v', func() {
-			tuiPush("showall", tuiShowAll())
+		AddItem("  📜  Logs", "Request log viewer", 'l', func() {
+			pushPage("sub", logsMenu())
 		}).
-		AddItem("🚪  Exit", "Quit config (q/Esc)", 'q', func() {
-			tuiApp.Stop()
-		})
-	l.SetBorder(true).SetTitle(" qoder-bridge config ").SetTitleAlign(tview.AlignCenter)
-	return l
+		AddItem("  📋  Show All Config", "Summary of all settings", 'v', func() {
+			pushPage("sub", showAllView())
+		}).
+		AddItem("  🔄  Update Bridge", "Pull latest, rebuild, restart", 'x', func() {
+			pushPage("sub", updateView())
+		}).
+		AddItem("  🚪  Exit", "Quit (q / Esc)", 'q', func() { app.Stop() })
+
+	list.SetBorder(true)
+	list.SetBorderColor(tcell.ColorNavy)
+	list.SetTitle(colorTitle + " qoder-bridge config ")
+	list.SetTitleAlign(tview.AlignCenter)
+
+	// Esc on list = exit
+	list.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		if event.Key() == tcell.KeyEscape {
+			app.Stop()
+			return nil
+		}
+		return event
+	})
+
+	return list
 }
 
 // ── API Keys ──────────────────────────────────────────────────────────────
 
-func tuiAPIKeyMenu() *tview.List {
+func apiKeyMenu() tview.Primitive {
 	key := cfgGet("api_key")
 	enabled := cfgBool("api_key_enabled", false)
 
-	status := "[red]disabled"
+	status := colorRed + "disabled"
 	if enabled {
-		status = "[green]enabled"
+		status = colorGreen + "enabled"
 	}
 	masked := "(not set)"
 	if key != "" {
 		masked = key[:min(8, len(key))] + "..." + key[max(0, len(key)-4):]
 	}
 
-	l := tview.NewList().
-		AddItem("Generate New Key", "Create sk-* key + auto-enable", 'g', func() {
+	list := tview.NewList().
+		AddItem("  Generate New Key", "Create random sk-* key + auto-enable", 'g', func() {
 			b := make([]byte, 24)
 			rand.Read(b)
 			newKey := "sk-" + hex.EncodeToString(b)
 			cfgSet("api_key", newKey)
 			cfgSet("api_key_enabled", "1")
-			tuiModal(fmt.Sprintf("✅ Generated & enabled:\n%s", newKey))
+			showMsg(fmt.Sprintf("%s✅ Generated & enabled:%s\n%s", colorGreen, colorReset, newKey), "apikey", apiKeyMenu)
 		}).
-		AddItem("Toggle On/Off", fmt.Sprintf("Currently: %s", status), 't', func() {
+		AddItem("  Toggle On/Off", fmt.Sprintf("Currently: %s%s", status, colorReset), 't', func() {
 			if enabled {
 				cfgSet("api_key_enabled", "0")
 			} else {
 				cfgSet("api_key_enabled", "1")
 			}
-			tuiModal("✅ Toggled! Re-open menu to see new status.")
+			showMsg("✅ Toggled! Re-open to see new status.", "apikey", apiKeyMenu)
 		}).
-		AddItem("View Current Key", masked, 'v', func() {
+		AddItem("  View Current Key", masked, 'v', func() {
 			if key == "" {
-				tuiModal("No API key configured.")
+				showMsg("No API key configured.", "apikey", apiKeyMenu)
 			} else {
-				tuiModal(fmt.Sprintf("Key: %s\nStatus: %s", key, status))
+				showMsg(fmt.Sprintf("Key: %s\nStatus: %s%s", key, status, colorReset), "apikey", apiKeyMenu)
 			}
 		}).
-		AddItem("🗑  Clear Key", "Remove key entirely", 'x', func() {
+		AddItem("  Clear Key", "Remove key entirely", 'x', func() {
 			cfgSet("api_key", "")
 			cfgSet("api_key_enabled", "0")
-			tuiModal("API key removed.")
+			showMsg("🗑 API key removed.", "apikey", apiKeyMenu)
 		}).
-		AddItem("← Back", "Esc to go back", 'b', func() { tuiGoBack() })
-	l.SetBorder(true).SetTitle(" API Keys ").SetTitleAlign(tview.AlignCenter)
-	return l
+		AddItem("  ← Back", "Esc to go back", 'b', func() { goBack() })
+
+	list.SetBorder(true).SetTitle(colorTitle + " API Keys ").SetTitleAlign(tview.AlignCenter)
+	wireEsc(list)
+	return list
 }
 
 // ── Proxy ─────────────────────────────────────────────────────────────────
 
-func tuiProxyMenu() *tview.List {
-	current := cfgGet("proxy")
-	if current == "" {
-		current = "(direct connection)"
+func proxyMenu() tview.Primitive {
+	cur := cfgGet("proxy")
+	if cur == "" {
+		cur = colorDim + "(direct connection)"
 	}
 
-	l := tview.NewList().
-		AddItem("Set Proxy", "Enter proxy URL", 's', func() {
-			tuiInput("Proxy URL", "socks5://user:pass@host:port", func(val string) {
+	list := tview.NewList().
+		AddItem("  Set Proxy", "Enter proxy URL", 's', func() {
+			showInput("Proxy URL", "socks5://user:pass@host:port", func(val string) {
 				cfgSet("proxy", val)
-				tuiModal(fmt.Sprintf("✅ Proxy set: %s\nRestart bridge to apply.", val))
+				showMsg(fmt.Sprintf("✅ Proxy set: %s\nRestart bridge to apply.", val), "proxy", proxyMenu)
 			})
 		}).
-		AddItem("View Current", current, 'v', func() {
-			tuiModal(fmt.Sprintf("Proxy: %s", current))
+		AddItem("  View Current", cur, 'v', func() {
+			showMsg("Proxy: "+cfgGet("proxy"), "proxy", proxyMenu)
 		}).
-		AddItem("🗑  Clear", "Remove proxy", 'x', func() {
+		AddItem("  Clear", "Remove proxy", 'x', func() {
 			cfgSet("proxy", "")
-			tuiModal("Proxy removed. Restart bridge to apply.")
+			showMsg("🗑 Proxy removed. Restart bridge to apply.", "proxy", proxyMenu)
 		}).
-		AddItem("← Back", "Esc to go back", 'b', func() { tuiGoBack() })
-	l.SetBorder(true).SetTitle(" Proxy ").SetTitleAlign(tview.AlignCenter)
-	return l
+		AddItem("  ← Back", "Esc", 'b', func() { goBack() })
+
+	list.SetBorder(true).SetTitle(colorTitle + " Proxy ").SetTitleAlign(tview.AlignCenter)
+	wireEsc(list)
+	return list
 }
 
-// ── Request Delay ─────────────────────────────────────────────────────────
+// ── Delay ─────────────────────────────────────────────────────────────────
 
-func tuiDelayMenu() *tview.List {
-	current := cfgGet("request_delay_ms")
-	display := current + " ms"
-	if current == "" {
-		display = "disabled"
+func delayMenu() tview.Primitive {
+	cur := cfgGet("request_delay_ms")
+	display := cur + " ms"
+	if cur == "" {
+		display = colorDim + "disabled"
 	}
 
-	l := tview.NewList().
-		AddItem("Set Delay", "Enter delay in ms", 's', func() {
-			tuiInput("Delay (ms)", "1000", func(val string) {
+	list := tview.NewList().
+		AddItem("  Set Delay", "Enter ms value", 's', func() {
+			showInput("Delay (ms)", "1000", func(val string) {
 				cfgSet("request_delay_ms", val)
-				tuiModal(fmt.Sprintf("✅ Delay set: %s ms", val))
+				showMsg(fmt.Sprintf("✅ Delay set: %s ms", val), "delay", delayMenu)
 			})
 		}).
-		AddItem("View Current", display, 'v', func() {
-			tuiModal(fmt.Sprintf("Delay: %s", display))
+		AddItem("  View Current", display, 'v', func() {
+			showMsg("Delay: "+cur, "delay", delayMenu)
 		}).
-		AddItem("Disable", "No delay", 'x', func() {
+		AddItem("  Disable", "No delay", 'x', func() {
 			cfgSet("request_delay_ms", "")
-			tuiModal("Delay disabled.")
+			showMsg("✅ Delay disabled.", "delay", delayMenu)
 		}).
-		AddItem("← Back", "Esc to go back", 'b', func() { tuiGoBack() })
-	l.SetBorder(true).SetTitle(" Request Delay ").SetTitleAlign(tview.AlignCenter)
-	return l
+		AddItem("  ← Back", "Esc", 'b', func() { goBack() })
+
+	list.SetBorder(true).SetTitle(colorTitle + " Request Delay ").SetTitleAlign(tview.AlignCenter)
+	wireEsc(list)
+	return list
 }
 
 // ── PAT Strategy ──────────────────────────────────────────────────────────
 
-func tuiStrategyMenu() *tview.List {
-	current := cfgGet("pat_strategy")
-	if current == "" {
-		current = "round-robin"
+func strategyMenu() tview.Primitive {
+	cur := cfgGet("pat_strategy")
+	if cur == "" {
+		cur = "round-robin"
 	}
 
-	l := tview.NewList().
-		AddItem("Round-Robin"+mark(current, "round-robin"), "Cycle PATs in order", 'r', func() {
+	rr := "  Round-Robin"
+	rn := "  Random"
+	if cur == "round-robin" {
+		rr = colorGreen + "  ✓ Round-Robin" + colorReset
+	} else {
+		rn = colorGreen + "  ✓ Random" + colorReset
+	}
+
+	list := tview.NewList().
+		AddItem(rr, "Cycle PATs in order", 'r', func() {
 			cfgSet("pat_strategy", "round-robin")
-			tuiModal("✅ Strategy: round-robin")
+			showMsg("✅ Strategy: round-robin", "strategy", strategyMenu)
 		}).
-		AddItem("Random"+mark(current, "random"), "Random PAT each request", 'd', func() {
+		AddItem(rn, "Random PAT each request", 'd', func() {
 			cfgSet("pat_strategy", "random")
-			tuiModal("✅ Strategy: random")
+			showMsg("✅ Strategy: random", "strategy", strategyMenu)
 		}).
-		AddItem("← Back", "Esc to go back", 'b', func() { tuiGoBack() })
-	l.SetBorder(true).SetTitle(" PAT Strategy ").SetTitleAlign(tview.AlignCenter)
-	return l
+		AddItem("  ← Back", "Esc", 'b', func() { goBack() })
+
+	list.SetBorder(true).SetTitle(colorTitle + " PAT Strategy ").SetTitleAlign(tview.AlignCenter)
+	wireEsc(list)
+	return list
+}
+
+// ── Import from .env ──────────────────────────────────────────────────────
+
+func importMenu() tview.Primitive {
+	// Scan .env for values
+	apiKey := ""
+	delay := ""
+	proxy := ""
+	strategy := ""
+
+	if envData != nil {
+		apiKey = envData.apiKey
+		if envData.requestDelay > 0 {
+			delay = fmt.Sprintf("%d", envData.requestDelay)
+		}
+		strategy = envData.strategy
+	}
+	proxy = os.Getenv("QODER_PROXY")
+
+	list := tview.NewList().
+		AddItem("  Import ALL from .env", "Migrate all detected values to DB", 'a', func() {
+			count := 0
+			if apiKey != "" && cfgGet("api_key") == "" {
+				cfgSet("api_key", apiKey)
+				cfgSet("api_key_enabled", "1")
+				count++
+			}
+			if delay != "" && cfgGet("request_delay_ms") == "" {
+				cfgSet("request_delay_ms", delay)
+				count++
+			}
+			if strategy != "" && cfgGet("pat_strategy") == "" {
+				cfgSet("pat_strategy", strategy)
+				count++
+			}
+			if proxy != "" && cfgGet("proxy") == "" {
+				cfgSet("proxy", proxy)
+				count++
+			}
+			showMsg(fmt.Sprintf("✅ Imported %d value(s) from .env to DB.\nDB is now source of truth.", count), "import", importMenu)
+		})
+
+	// Show detected values
+	if apiKey != "" {
+		masked := apiKey[:min(8, len(apiKey))] + "..."
+		status := colorDim + "empty"
+		if cfgGet("api_key") != "" {
+			status = colorGreen + "already in DB"
+		}
+		list.AddItem(fmt.Sprintf("  API Key: %s", masked), status, 'k', nil)
+	} else {
+		list.AddItem("  API Key: (not in .env)", "", 'k', nil)
+	}
+
+	if delay != "" {
+		status := colorDim + "empty"
+		if cfgGet("request_delay_ms") != "" {
+			status = colorGreen + "already in DB"
+		}
+		list.AddItem(fmt.Sprintf("  Delay: %s ms", delay), status, 'd', nil)
+	}
+
+	if strategy != "" {
+		status := colorDim + "empty"
+		if cfgGet("pat_strategy") != "" {
+			status = colorGreen + "already in DB"
+		}
+		list.AddItem(fmt.Sprintf("  Strategy: %s", strategy), status, 's', nil)
+	}
+
+	if proxy != "" {
+		masked := proxy
+		if len(proxy) > 30 {
+			masked = proxy[:30] + "..."
+		}
+		status := colorDim + "empty"
+		if cfgGet("proxy") != "" {
+			status = colorGreen + "already in DB"
+		}
+		list.AddItem(fmt.Sprintf("  Proxy: %s", masked), status, 'p', nil)
+	}
+
+	list.AddItem("  ← Back", "Esc", 'b', func() { goBack() })
+	list.SetBorder(true).SetTitle(colorTitle + " Import from .env ").SetTitleAlign(tview.AlignCenter)
+	wireEsc(list)
+	return list
 }
 
 // ── Usage ─────────────────────────────────────────────────────────────────
 
-func tuiUsageMenu() *tview.List {
-	l := tview.NewList().
-		AddItem("Today", "Since midnight", 't', func() { tuiShowUsage("today") }).
-		AddItem("This Week", "Past 7 days", 'w', func() { tuiShowUsage("week") }).
-		AddItem("This Month", "Past 30 days", 'm', func() { tuiShowUsage("month") }).
-		AddItem("This Year", "Past 365 days", 'y', func() { tuiShowUsage("year") }).
-		AddItem("Custom Range", "DD-MM-YYYY to DD-MM-YYYY", 'c', func() {
-			tuiDateRange(func(from, to string) { tuiShowUsage("custom", from, to) })
+func usageMenu() tview.Primitive {
+	list := tview.NewList().
+		AddItem("  Today", "Since midnight", 't', func() { showUsage("today") }).
+		AddItem("  This Week", "Past 7 days", 'w', func() { showUsage("week") }).
+		AddItem("  This Month", "Past 30 days", 'm', func() { showUsage("month") }).
+		AddItem("  This Year", "Past 365 days", 'y', func() { showUsage("year") }).
+		AddItem("  Custom Range", "DD-MM-YYYY to DD-MM-YYYY", 'c', func() {
+			showDateInput(func(from, to string) { showUsage("custom", from, to) })
 		}).
-		AddItem("← Back", "Esc to go back", 'b', func() { tuiGoBack() })
-	l.SetBorder(true).SetTitle(" Usage ").SetTitleAlign(tview.AlignCenter)
-	return l
+		AddItem("  ← Back", "Esc", 'b', func() { goBack() })
+
+	list.SetBorder(true).SetTitle(colorTitle + " Usage ").SetTitleAlign(tview.AlignCenter)
+	wireEsc(list)
+	return list
 }
 
-func tuiShowUsage(period string, dates ...string) {
+func showUsage(period string, dates ...string) {
 	var args []string
 	if period == "custom" && len(dates) >= 2 {
 		args = []string{"custom", dates[0], dates[1]}
@@ -239,23 +378,23 @@ func tuiShowUsage(period string, dates ...string) {
 	}
 	fromTS, toTS, label, err := parseDateRange(args)
 	if err != nil {
-		tuiModal(fmt.Sprintf("Error: %v", err))
+		showMsg(fmt.Sprintf("Error: %v", err), "usage", usageMenu)
 		return
 	}
 	rows, err := queryUsage(fromTS, toTS)
 	if err != nil {
-		tuiModal(fmt.Sprintf("Error: %v", err))
+		showMsg(fmt.Sprintf("Error: %v", err), "usage", usageMenu)
 		return
 	}
 
 	t := tview.NewTable().SetFixed(1, 0).SetSelectable(true, false)
-	t.SetBorder(true).SetTitle(fmt.Sprintf(" Usage: %s ", label)).SetTitleAlign(tview.AlignCenter)
+	t.SetBorder(true).SetTitle(fmt.Sprintf(" %sUsage: %s %s ", colorTitle, label, colorReset)).SetTitleAlign(tview.AlignCenter)
 
 	for i, h := range []string{"PAT", "Model", "Requests", "Tokens", "Credits"} {
 		t.SetCell(0, i, tview.NewTableCell(h).SetTextColor(tcell.ColorYellow).SetSelectable(false).SetExpansion(1))
 	}
 	if len(rows) == 0 {
-		t.SetCell(1, 0, tview.NewTableCell("No data").SetSelectable(false))
+		t.SetCell(1, 0, tview.NewTableCell("No data for this period.").SetSelectable(false))
 	} else {
 		for i, r := range rows {
 			t.SetCell(i+1, 0, tview.NewTableCell(r.PAT).SetExpansion(1))
@@ -266,25 +405,27 @@ func tuiShowUsage(period string, dates ...string) {
 		}
 	}
 
-	tuiPush("table", tuiWrapTable(t))
+	pushPage("sub", wrapTable(t))
 }
 
 // ── Logs ──────────────────────────────────────────────────────────────────
 
-func tuiLogsMenu() *tview.List {
-	l := tview.NewList().
-		AddItem("Today", "Since midnight", 't', func() { tuiShowLogs("today") }).
-		AddItem("This Week", "Past 7 days", 'w', func() { tuiShowLogs("week") }).
-		AddItem("This Month", "Past 30 days", 'm', func() { tuiShowLogs("month") }).
-		AddItem("Custom Range", "DD-MM-YYYY to DD-MM-YYYY", 'c', func() {
-			tuiDateRange(func(from, to string) { tuiShowLogs("custom", from, to) })
+func logsMenu() tview.Primitive {
+	list := tview.NewList().
+		AddItem("  Today", "Since midnight", 't', func() { showLogs("today") }).
+		AddItem("  This Week", "Past 7 days", 'w', func() { showLogs("week") }).
+		AddItem("  This Month", "Past 30 days", 'm', func() { showLogs("month") }).
+		AddItem("  Custom Range", "DD-MM-YYYY to DD-MM-YYYY", 'c', func() {
+			showDateInput(func(from, to string) { showLogs("custom", from, to) })
 		}).
-		AddItem("← Back", "Esc to go back", 'b', func() { tuiGoBack() })
-	l.SetBorder(true).SetTitle(" Request Logs ").SetTitleAlign(tview.AlignCenter)
-	return l
+		AddItem("  ← Back", "Esc", 'b', func() { goBack() })
+
+	list.SetBorder(true).SetTitle(colorTitle + " Request Logs ").SetTitleAlign(tview.AlignCenter)
+	wireEsc(list)
+	return list
 }
 
-func tuiShowLogs(period string, dates ...string) {
+func showLogs(period string, dates ...string) {
 	var args []string
 	if period == "custom" && len(dates) >= 2 {
 		args = []string{"custom", dates[0], dates[1]}
@@ -293,23 +434,23 @@ func tuiShowLogs(period string, dates ...string) {
 	}
 	fromTS, toTS, label, err := parseDateRange(args)
 	if err != nil {
-		tuiModal(fmt.Sprintf("Error: %v", err))
+		showMsg(fmt.Sprintf("Error: %v", err), "logs", logsMenu)
 		return
 	}
 	logRows, err := queryLogs(fromTS, toTS)
 	if err != nil {
-		tuiModal(fmt.Sprintf("Error: %v", err))
+		showMsg(fmt.Sprintf("Error: %v", err), "logs", logsMenu)
 		return
 	}
 
 	t := tview.NewTable().SetFixed(1, 0).SetSelectable(true, false)
-	t.SetBorder(true).SetTitle(fmt.Sprintf(" Logs: %s ", label)).SetTitleAlign(tview.AlignCenter)
+	t.SetBorder(true).SetTitle(fmt.Sprintf(" %sLogs: %s %s ", colorTitle, label, colorReset)).SetTitleAlign(tview.AlignCenter)
 
 	for i, h := range []string{"Time (WIB)", "PAT", "Model", "Tokens", "Credits", "Status", "Latency"} {
 		t.SetCell(0, i, tview.NewTableCell(h).SetTextColor(tcell.ColorYellow).SetSelectable(false).SetExpansion(1))
 	}
 	if len(logRows) == 0 {
-		t.SetCell(1, 0, tview.NewTableCell("No logs").SetSelectable(false))
+		t.SetCell(1, 0, tview.NewTableCell("No logs for this period.").SetSelectable(false))
 	} else {
 		for i, r := range logRows {
 			sc := tcell.ColorGreen
@@ -326,12 +467,12 @@ func tuiShowLogs(period string, dates ...string) {
 		}
 	}
 
-	tuiPush("table", tuiWrapTable(t))
+	pushPage("sub", wrapTable(t))
 }
 
-// ── Show All ──────────────────────────────────────────────────────────────
+// ── Show All Config ───────────────────────────────────────────────────────
 
-func tuiShowAll() *tview.List {
+func showAllView() tview.Primitive {
 	key := cfgGet("api_key")
 	enabled := cfgBool("api_key_enabled", false)
 	delay := cfgGet("request_delay_ms")
@@ -346,9 +487,9 @@ func tuiShowAll() *tview.List {
 	if key != "" {
 		masked = key[:min(8, len(key))] + "..."
 	}
-	status := "disabled"
+	status := colorRed + "disabled"
 	if enabled {
-		status = "enabled"
+		status = colorGreen + "enabled"
 	}
 	if delay == "" {
 		delay = "off"
@@ -360,48 +501,182 @@ func tuiShowAll() *tview.List {
 		proxy = "(direct)"
 	}
 
-	l := tview.NewList().
-		AddItem(fmt.Sprintf("API Key:      %s", masked), fmt.Sprintf("Status: %s", status), 'k', nil).
-		AddItem(fmt.Sprintf("Delay:        %s ms", delay), "", 'd', nil).
-		AddItem(fmt.Sprintf("Domain:       %s", domain), "", 'm', nil).
-		AddItem(fmt.Sprintf("Proxy:        %s", proxy), "", 'p', nil).
-		AddItem(fmt.Sprintf("PAT Strategy: %s", strategy), "", 's', nil).
-		AddItem("← Back", "Esc to go back", 'b', func() { tuiGoBack() })
-	l.SetBorder(true).SetTitle(" All Config ").SetTitleAlign(tview.AlignCenter)
-	return l
+	list := tview.NewList().
+		AddItem(fmt.Sprintf("  API Key:      %s", masked), fmt.Sprintf("  Status: %s%s", status, colorReset), 0, nil).
+		AddItem(fmt.Sprintf("  Delay:        %s ms", delay), "", 0, nil).
+		AddItem(fmt.Sprintf("  Domain:       %s", domain), "", 0, nil).
+		AddItem(fmt.Sprintf("  Proxy:        %s", proxy), "", 0, nil).
+		AddItem(fmt.Sprintf("  PAT Strategy: %s", strategy), "", 0, nil).
+		AddItem("  ← Back", "Esc", 'b', func() { goBack() })
+
+	list.SetBorder(true).SetTitle(colorTitle + " All Config ").SetTitleAlign(tview.AlignCenter)
+	wireEsc(list)
+	return list
+}
+
+// ── Update ────────────────────────────────────────────────────────────────
+
+func updateView() tview.Primitive {
+	text := tview.NewTextView().SetDynamicColors(true)
+	text.SetBorder(true).SetTitle(colorTitle + " Update Bridge ").SetTitleAlign(tview.AlignCenter)
+	text.SetText(fmt.Sprintf("\n  %sThis will run:%s\n\n  %scd <bridge-dir> && git pull && go build -o qoder-bridge .%s\n\n  %sAfter build, restart the bridge:%s\n  %s./qoder-bridge stop && ./qoder-bridge%s\n\n  %sPress Enter to update, Esc to cancel.%s",
+		colorKey, colorReset,
+		colorAccent, colorReset,
+		colorKey, colorReset,
+		colorAccent, colorReset,
+		colorDim, colorReset))
+
+	text.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		switch event.Key() {
+		case tcell.KeyEscape:
+			goBack()
+			return nil
+		case tcell.KeyEnter:
+			// Run update
+			result := tuiRunUpdate()
+			pages.RemovePage("sub")
+			pushPage("sub", updateResult(result))
+			return nil
+		}
+		return event
+	})
+
+	return text
+}
+
+func tuiRunUpdate() string {
+	var sb strings.Builder
+
+	// git pull
+	cmd := exec.Command("git", "pull", "--ff-only")
+	cmd.Dir = bridgeDir()
+	out, err := cmd.CombinedOutput()
+	sb.WriteString(fmt.Sprintf("$ git pull\n%s\n", string(out)))
+	if err != nil {
+		sb.WriteString(fmt.Sprintf("Error: %v\n", err))
+		return sb.String()
+	}
+
+	// go build
+	cmd = exec.Command("go", "build", "-o", "qoder-bridge", ".")
+	cmd.Dir = bridgeDir()
+	out, err = cmd.CombinedOutput()
+	sb.WriteString(fmt.Sprintf("$ go build\n%s\n", string(out)))
+	if err != nil {
+		sb.WriteString(fmt.Sprintf("Build error: %v\n", err))
+		return sb.String()
+	}
+
+	sb.WriteString("✅ Build successful! Restart bridge to apply.\n")
+	return sb.String()
+}
+
+func bridgeDir() string {
+	// Try to find bridge dir from executable path
+	if ex, err := os.Executable(); err == nil {
+		return strings.TrimSuffix(ex, "/qoder-bridge")
+	}
+	return "."
+}
+
+func updateResult(result string) tview.Primitive {
+	text := tview.NewTextView().SetDynamicColors(true).SetText(result)
+	text.SetBorder(true).SetTitle(colorTitle + " Update Result ").SetTitleAlign(tview.AlignCenter)
+	text.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		if event.Key() == tcell.KeyEscape {
+			goBack()
+			return nil
+		}
+		return event
+	})
+	return text
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 
-func tuiModal(msg string) {
-	m := tview.NewModal().
+// wireEsc adds Esc → goBack on a List or Table.
+func wireEsc(p tview.Primitive) {
+	if l, ok := p.(*tview.List); ok {
+		l.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+			if event.Key() == tcell.KeyEscape {
+				goBack()
+				return nil
+			}
+			return event
+		})
+	}
+	if t, ok := p.(*tview.Table); ok {
+		t.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+			if event.Key() == tcell.KeyEscape {
+				goBack()
+				return nil
+			}
+			return event
+		})
+	}
+}
+
+// wrapTable wraps a table with a footer showing key hints.
+func wrapTable(t *tview.Table) tview.Primitive {
+	wireEsc(t)
+	hint := tview.NewTextView().SetDynamicColors(true).
+		SetText(fmt.Sprintf("  %s↑↓%s navigate   %sEsc%s go back", colorKey, colorReset, colorKey, colorReset))
+	flex := tview.NewFlex().SetDirection(tview.FlexRow).
+		AddItem(t, 0, 1, true).
+		AddItem(hint, 1, 0, false)
+	// Wire Esc on the flex too (in case table doesn't get focus)
+	flex.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		if event.Key() == tcell.KeyEscape {
+			goBack()
+			return nil
+		}
+		return event
+	})
+	return flex
+}
+
+// showMsg displays a modal message, then returns to the named menu.
+func showMsg(msg string, menuName string, menuBuilder func() tview.Primitive) {
+	modal := tview.NewModal().
 		SetText(msg).
 		AddButtons([]string{"OK"}).
 		SetDoneFunc(func(_ int, _ string) {
-			tuiGoBack()
+			pages.RemovePage("modal")
 		})
-	tuiPush("modal", m)
+	modal.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		if event.Key() == tcell.KeyEscape {
+			pages.RemovePage("modal")
+			return nil
+		}
+		return event
+	})
+	pages.AddAndSwitchToPage("modal", modal, true)
 }
 
-func tuiInput(label, placeholder string, onSubmit func(string)) {
-	inp := tview.NewInputField().SetLabel(label).SetPlaceholder(placeholder).SetFieldWidth(40)
+// showInput shows an input form.
+func showInput(label, placeholder string, onSubmit func(string)) {
+	inp := tview.NewInputField().SetLabel(label).SetPlaceholder(placeholder).SetFieldWidth(50)
 	form := tview.NewForm().
 		AddFormItem(inp).
 		AddButton("Submit", func() {
 			v := strings.TrimSpace(inp.GetText())
 			if v != "" {
-				tuiGoBack()
+				pages.RemovePage("form")
 				onSubmit(v)
 			}
 		}).
-		AddButton("Cancel", func() { tuiGoBack() })
+		AddButton("Cancel", func() {
+			pages.RemovePage("form")
+		})
 	form.SetBorder(true).SetTitle(fmt.Sprintf(" %s ", label)).SetTitleAlign(tview.AlignCenter)
-	tuiPush("input", form)
+	form.SetCancelFunc(func() { pages.RemovePage("form") })
+	pages.AddAndSwitchToPage("form", form, true)
 }
 
-func tuiDateRange(onSubmit func(from, to string)) {
-	fromF := tview.NewInputField().SetLabel("From (DD-MM-YYYY)").SetFieldWidth(20)
-	toF := tview.NewInputField().SetLabel("To (DD-MM-YYYY)").SetFieldWidth(20)
+// showDateInput shows a date range input.
+func showDateInput(onSubmit func(from, to string)) {
+	fromF := tview.NewInputField().SetLabel("From (DD-MM-YYYY) ").SetFieldWidth(20)
+	toF := tview.NewInputField().SetLabel("  To (DD-MM-YYYY) ").SetFieldWidth(20)
 	form := tview.NewForm().
 		AddFormItem(fromF).
 		AddFormItem(toF).
@@ -409,26 +684,14 @@ func tuiDateRange(onSubmit func(from, to string)) {
 			from := strings.TrimSpace(fromF.GetText())
 			to := strings.TrimSpace(toF.GetText())
 			if from != "" && to != "" {
-				tuiGoBack()
+				pages.RemovePage("form")
 				onSubmit(from, to)
 			}
 		}).
-		AddButton("Cancel", func() { tuiGoBack() })
+		AddButton("Cancel", func() {
+			pages.RemovePage("form")
+		})
 	form.SetBorder(true).SetTitle(" Date Range ").SetTitleAlign(tview.AlignCenter)
-	tuiPush("input", form)
-}
-
-// tuiWrapTable wraps a table in a Flex with a footer hint.
-func tuiWrapTable(t *tview.Table) *tview.Flex {
-	hint := tview.NewTextView().SetTextAlign(tview.AlignCenter).SetText("[yellow]↑↓[white] navigate  [yellow]Esc[white] go back")
-	return tview.NewFlex().SetDirection(tview.FlexRow).
-		AddItem(t, 0, 1, true).
-		AddItem(hint, 1, 0, false)
-}
-
-func mark(current, this string) string {
-	if current == this {
-		return " ✓"
-	}
-	return ""
+	form.SetCancelFunc(func() { pages.RemovePage("form") })
+	pages.AddAndSwitchToPage("form", form, true)
 }

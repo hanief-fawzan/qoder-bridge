@@ -15,7 +15,7 @@ Uses COSY signing (RSA-2048 + AES-128-CBC + MD5) directly — **no qodercli, no 
 |--------|:-------------------:|:---------------------:|
 | 🕐 Cold start | ~9–14s | **~50ms** |
 | 💾 RAM usage | ~300 MB spike | **~8 MB constant** |
-| 📦 Binary size | 200 MB+ (npm) | **~11 MB** |
+| 📦 Binary size | 200 MB+ (npm) | **~12 MB** |
 | 🔗 Dependencies | Node.js + npm | **none** |
 | 📡 Streaming | ✅ | ✅ |
 
@@ -66,7 +66,8 @@ That's it. Bridge is live on `http://127.0.0.1:7100` running in background.
 | `./qoder-bridge status` | Check if running |
 | `./qoder-bridge update` | Pull from git, rebuild, restart |
 | `./qoder-bridge quota` | Check PAT quota and exit |
-| `./qoder-bridge config` | Manage runtime config (see below) |
+| `./qoder-bridge config` | **Interactive TUI config menu** |
+| `./qoder-bridge config show` | Show config (non-interactive) |
 | `./qoder-bridge usage` | View token/credit usage (see below) |
 | `./qoder-bridge logs` | View request logs (see below) |
 | `./qoder-bridge help` | Show help |
@@ -93,20 +94,52 @@ COMBO_FAST=efficient,lite
 COMBO_SMART=ultimate,Kimi-K3,DeepSeek-V4-Pro
 ```
 
-### Runtime config via DB (`qoder-bridge config`)
+### Interactive TUI Config (`qoder-bridge config`)
 
-Everything else is managed via the built-in SQLite DB — no restart needed for most changes:
+Launch the interactive menu:
 
 ```bash
-# View all config
 qoder-bridge config
+```
 
+```
+┌─ qoder-bridge config ──────────────────┐
+│  🔑  API Keys                   [a]    │
+│  🌐  Proxy                      [p]    │
+│  ⏱   Request Delay              [d]    │
+│  🔄  PAT Strategy               [s]    │
+│  📦  Import from .env           [i]    │
+│  📊  Usage                      [u]    │
+│  📜  Logs                       [l]    │
+│  📋  Show All Config            [v]    │
+│  🔄  Update Bridge              [x]    │
+│  🚪  Exit                       [q]    │
+└────────────────────────────────────────┘
+  ↑↓ navigate  Enter select  Esc back
+```
+
+Navigate with **arrow keys**, select with **Enter**, go back with **Esc**.
+
+Submenus:
+- **API Keys**: Generate, toggle on/off, view, clear
+- **Proxy**: Set, view, clear proxy URL
+- **Request Delay**: Set anti-ban delay in ms
+- **PAT Strategy**: Round-robin or random rotation
+- **Import from .env**: Auto-detect and migrate `.env` values to DB
+- **Usage**: Token/credit usage by period (today/week/month/year/custom)
+- **Logs**: Request log viewer with status colors
+- **Show All Config**: Summary view
+- **Update Bridge**: Pull, rebuild, restart from TUI
+
+### CLI Config (non-interactive)
+
+```bash
 # API Key
 qoder-bridge config apikey gen       # Generate new sk-* key + auto-enable
 qoder-bridge config apikey show      # Show current key
-qoder-bridge config apikey on        # Enable auth (key stays, just toggles)
-qoder-bridge config apikey off       # Disable auth (key stays, just toggles)
-qoder-bridge config apikey clear     # Remove key entirely
+qoder-bridge config apikey on        # Enable auth
+qoder-bridge config apikey off       # Disable auth
+qoder-bridge config apikey clear     # Remove key
 
 # Anti-ban delay
 qoder-bridge config delay set 1000   # Random 0-1000ms per request
@@ -116,10 +149,14 @@ qoder-bridge config delay off        # Disable
 qoder-bridge config domain set qoder.example.com
 qoder-bridge config domain clear
 
-# Proxy (comma-separated for multi-proxy rotation)
+# Proxy
 qoder-bridge config proxy set socks5://user:pass@127.0.0.1:1080
 qoder-bridge config proxy clear
 ```
+
+### Runtime config via DB
+
+Config is stored in SQLite (`~/.qoder-bridge/data.db`). Most changes take effect immediately without restart.
 
 ---
 
@@ -144,6 +181,8 @@ qoder-bridge usage year
 qoder-bridge usage custom 01-07-2026 30-07-2026
 ```
 
+Or use the TUI: `qoder-bridge config` → Usage
+
 Output shows per-PAT, per-model breakdown with estimated tokens and credits.
 
 ### Request Logs
@@ -153,6 +192,8 @@ qoder-bridge logs today
 qoder-bridge logs week
 qoder-bridge logs custom 01-07-2026 30-07-2026
 ```
+
+Or use the TUI: `qoder-bridge config` → Logs
 
 Shows: timestamp (WIB + UTC), PAT, model, stream, tokens, credits, status, latency.
 
@@ -183,7 +224,7 @@ Shows: timestamp (WIB + UTC), PAT, model, stream, tokens, credits, status, laten
 - **Location**: `~/.qoder-bridge/data.db` (SQLite, pure Go, no CGO)
 - **Auto-cleanup**: Logs older than 365 days are automatically deleted every hour
 - **Size cap**: If DB exceeds ~100MB, oldest 20% of logs are pruned
-- **Config table** (`api_key`, `proxy`, `domain`, `delay`) is **never** cleaned up — only `request_logs` are affected by cleanup
+- **Config table** (`api_key`, `proxy`, `domain`, `delay`, `pat_strategy`) is **never** cleaned up — only `request_logs` are affected by cleanup
 - **Runs without DB**: If SQLite fails to init, bridge still works (just no logging/config)
 
 ---
@@ -307,7 +348,7 @@ QODER_PROXY=socks5://user:pass@127.0.0.1:1080
 QODER_PROXY=socks5://a:pass1@1.2.3.4:1080,socks5://b:pass2@5.6.7.8:1080
 ```
 
-Or configure via CLI: `qoder-bridge config proxy set socks5://...`
+Or configure via TUI: `qoder-bridge config` → Proxy
 
 ---
 
@@ -316,6 +357,8 @@ Or configure via CLI: `qoder-bridge config proxy set socks5://...`
 ```bash
 ./qoder-bridge update    # pull + build + restart
 ```
+
+Or from the TUI: `qoder-bridge config` → Update Bridge
 
 After changing `.env`: `./qoder-bridge stop && ./qoder-bridge`
 
@@ -335,7 +378,7 @@ docker compose up -d
 go build -o qoder-bridge .
 ```
 
-Requires **Go 1.21+**. One external dependency (`golang.org/x/net` for SOCKS5 + `modernc.org/sqlite` for pure-Go SQLite).
+Requires **Go 1.21+**. Dependencies: `golang.org/x/net` (SOCKS5) + `modernc.org/sqlite` (pure-Go SQLite).
 
 ---
 

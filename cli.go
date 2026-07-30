@@ -22,7 +22,8 @@ func runConfigCLI(args []string) {
 	}
 
 	if len(args) == 0 {
-		runConfigTUI()
+		cfg := loadEnv("")
+		runConfigTUI(cfg)
 		return
 	}
 
