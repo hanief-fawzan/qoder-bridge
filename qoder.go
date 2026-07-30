@@ -14,6 +14,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -361,6 +362,7 @@ func fetchQuota(pat string) QuotaInfo {
 
 // normalizeMessages hoists system messages out of the array and flattens
 // multipart content. Qoder rejects system messages inside the messages array.
+// Preserves assistant tool_calls and tool results with tool_call_id.
 func normalizeMessages(messages []ChatMessage, tools []ToolDef) ([]ChatMessage, string) {
 	var systemParts []string
 	var out []ChatMessage
@@ -373,21 +375,19 @@ func normalizeMessages(messages []ChatMessage, tools []ToolDef) ([]ChatMessage, 
 			}
 			continue
 		case "tool":
-			// Convert tool result to readable user message
-			toolName := "unknown"
+			// Convert tool result to readable user message with context
 			if text != "" {
 				out = append(out, ChatMessage{
 					Role:    "user",
 					Content: "[Tool Result]\n" + text,
 				})
 			}
-			_ = toolName
 			continue
 		case "assistant":
-			if text == "" {
-				// Empty assistant message (tool_calls-only) — skip
-				continue
-			}
+			// Preserve assistant message even if content is empty (has tool_calls)
+			// The raw content may contain tool_calls JSON from the original model
+			out = append(out, ChatMessage{Role: m.Role, Content: text})
+			continue
 		}
 		out = append(out, ChatMessage{Role: m.Role, Content: text})
 	}
@@ -403,7 +403,13 @@ func normalizeMessages(messages []ChatMessage, tools []ToolDef) ([]ChatMessage, 
 			if desc == "" {
 				desc = "(no description)"
 			}
-			toolParts = append(toolParts, fmt.Sprintf("- %s: %s", t.Function.Name, desc))
+			// Include parameter schema for each tool
+			paramJSON, _ := json.Marshal(t.Function.Parameters)
+			if string(paramJSON) == "null" || string(paramJSON) == "{}" {
+				toolParts = append(toolParts, fmt.Sprintf("- %s: %s", t.Function.Name, desc))
+			} else {
+				toolParts = append(toolParts, fmt.Sprintf("- %s: %s\n  Parameters: %s", t.Function.Name, desc, string(paramJSON)))
+			}
 		}
 		systemParts = append([]string{strings.Join(toolParts, "\n")}, systemParts...)
 	}
@@ -480,6 +486,74 @@ func truncate(s string, n int) string {
 	return s
 }
 
+// parseToolCallsFromText extracts ```tool_call blocks from Qoder text response.
+// Returns parsed tool_calls and clean text with tool_call blocks removed.
+func parseToolCallsFromText(text string) ([]ToolCall, string) {
+	// Pattern: ```tool_call\n{...}\n``` or ```tool_call\n[{...},{...}]\n```
+	re := regexp.MustCompile("(?s)`{3}tool_call\\s*\\n(\\[.*?\\]|\\{.*?\\})\\s*\\n`{3}")
+	matches := re.FindAllStringSubmatch(text, -1)
+	if len(matches) == 0 {
+		return nil, text
+	}
+
+	var calls []ToolCall
+	for _, match := range matches {
+		if len(match) < 2 {
+			continue
+		}
+		raw := match[1]
+
+		// Try parsing as array of calls first
+		var arr []map[string]interface{}
+		if err := json.Unmarshal([]byte(raw), &arr); err == nil {
+			for _, obj := range arr {
+				if tc := mapToToolCall(obj); tc != nil {
+					calls = append(calls, *tc)
+				}
+			}
+			continue
+		}
+
+		// Try single object
+		var obj map[string]interface{}
+		if err := json.Unmarshal([]byte(raw), &obj); err == nil {
+			if tc := mapToToolCall(obj); tc != nil {
+				calls = append(calls, *tc)
+			}
+		}
+	}
+
+	// Remove tool_call blocks from text
+	cleanText := re.ReplaceAllString(text, "")
+	cleanText = strings.TrimSpace(cleanText)
+
+	return calls, cleanText
+}
+
+func mapToToolCall(obj map[string]interface{}) *ToolCall {
+	name, _ := obj["name"].(string)
+	if name == "" {
+		return nil
+	}
+	args := obj["arguments"]
+	var argsJSON string
+	switch a := args.(type) {
+	case string:
+		argsJSON = a
+	default:
+		b, _ := json.Marshal(a)
+		argsJSON = string(b)
+	}
+	if argsJSON == "" {
+		argsJSON = "{}"
+	}
+	return &ToolCall{
+		ID:       "call_" + uuidString()[:8],
+		Type:     "function",
+		Function: ToolCallFn{Name: name, Arguments: argsJSON},
+	}
+}
+
 // buildQoderRequestBody creates the exact JSON payload Qoder expects.
 func buildQoderRequestBody(modelKey string, messages []ChatMessage, maxTokens int, creds *patCredential, tools []ToolDef, thinkingEffort string, contextWindow int) ([]byte, error) {
 	mc, err := getModelConfig(creds, modelKey)
@@ -549,11 +623,23 @@ func buildQoderRequestBody(modelKey string, messages []ChatMessage, maxTokens in
 	return json.Marshal(payload)
 }
 
-// ChatResult holds the response from a Qoder chat call.
 type ChatResult struct {
 	Text      string
+	ToolCalls []ToolCall // parsed from text if present
 	Error     error
 	RequestID string
+}
+
+// ToolCall represents a parsed tool call from Qoder's text response.
+type ToolCall struct {
+	ID        string      `json:"id"`
+	Type      string      `json:"type"`
+	Function  ToolCallFn  `json:"function"`
+}
+
+type ToolCallFn struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
 }
 
 // StreamCallback is called for each text chunk during streaming.
@@ -650,17 +736,20 @@ func callQoder(ctx context.Context, pat, modelKey string, messages []ChatMessage
 		return nil, fmt.Errorf("parse SSE: %w", err)
 	}
 
-	return &ChatResult{Text: text}, nil
+	// 7. Parse tool_call blocks from text response
+	toolCalls, cleanText := parseToolCallsFromText(text)
+
+	return &ChatResult{Text: cleanText, ToolCalls: toolCalls}, nil
 }
 
 // unwrapQoderSSE reads Qoder's SSE stream which wraps responses in a
 // {statusCodeValue, body} envelope and returns the concatenated text.
 func unwrapQoderSSE(body io.Reader, onChunk StreamCallback) (string, error) {
 	var full strings.Builder
+	var toolCalls []map[string]interface{} // accumulated tool_calls from stream
 	sawDone := false
 	scanner := bufio.NewScanner(body)
-	// Tool calls and long structured chunks may exceed Scanner's 64 KiB default.
-	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024) // 4MB max chunk
 
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
@@ -702,10 +791,12 @@ func unwrapQoderSSE(body io.Reader, onChunk StreamCallback) (string, error) {
 		var chunk struct {
 			Choices []struct {
 				Delta struct {
-					Content string `json:"content"`
+					Content   string                   `json:"content"`
+					ToolCalls []map[string]interface{} `json:"tool_calls"`
 				} `json:"delta"`
 				Message struct {
-					Content string `json:"content"`
+					Content   string                   `json:"content"`
+					ToolCalls []map[string]interface{} `json:"tool_calls"`
 				} `json:"message"`
 			} `json:"choices"`
 		}
@@ -714,8 +805,15 @@ func unwrapQoderSSE(body io.Reader, onChunk StreamCallback) (string, error) {
 		}
 		for _, ch := range chunk.Choices {
 			text := ch.Delta.Content
+			tc := ch.Delta.ToolCalls
 			if text == "" {
 				text = ch.Message.Content
+			}
+			if len(tc) == 0 {
+				tc = ch.Message.ToolCalls
+			}
+			if len(tc) > 0 {
+				toolCalls = append(toolCalls, tc...)
 			}
 			if text != "" {
 				full.WriteString(text)

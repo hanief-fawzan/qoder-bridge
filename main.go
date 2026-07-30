@@ -228,10 +228,11 @@ type ChatResponse struct {
 }
 
 type Choice struct {
-	Index        int      `json:"index"`
-	Message      *Message `json:"message,omitempty"`
-	Delta        *Message `json:"delta,omitempty"`
-	FinishReason string   `json:"finish_reason,omitempty"`
+	Index        int         `json:"index"`
+	Message      *Message    `json:"message,omitempty"`
+	Delta        *Message    `json:"delta,omitempty"`
+	FinishReason string      `json:"finish_reason,omitempty"`
+	ToolCalls    []ToolCall  `json:"tool_calls,omitempty"`
 }
 
 type Message struct {
@@ -439,8 +440,26 @@ func handleStream(w http.ResponseWriter, r *http.Request, req ChatRequest, model
 				Choices: []SSEChoice{{Index: 0, Delta: json.RawMessage(`{"content":` + mustQuote(errMsg) + `}`)}},
 			})
 		}
+	} else if result != nil && len(result.ToolCalls) > 0 {
+		// Emit tool_calls as OpenAI-compatible chunk
+		if flusher != nil {
+			for _, tc := range result.ToolCalls {
+				tcDelta, _ := json.Marshal(map[string]interface{}{
+					"index": 0,
+					"id":    tc.ID,
+					"type":  "function",
+					"function": map[string]interface{}{
+						"name":      tc.Function.Name,
+						"arguments": tc.Function.Arguments,
+					},
+				})
+				sendSSE(w, flusher, SSEChunk{
+					ID: id, Object: "chat.completion.chunk", Created: created, Model: req.Model,
+					Choices: []SSEChoice{{Index: 0, Delta: json.RawMessage(`{"tool_calls":[` + string(tcDelta) + `]}`)}},
+				})
+			}
+		}
 	}
-	_ = result
 
 	if flusher != nil {
 		stop := "stop"
@@ -460,12 +479,26 @@ func handleNonStream(w http.ResponseWriter, r *http.Request, req ChatRequest, mo
 		return
 	}
 
+	text := ""
+	if result != nil {
+		text = result.Text
+	}
+
+	choices := []Choice{{Index: 0, Message: &Message{Role: "assistant", Content: text}, FinishReason: "stop"}}
+	if result != nil && len(result.ToolCalls) > 0 {
+		// Return tool_calls in OpenAI format
+		choices = []Choice{{Index: 0, Message: &Message{Role: "assistant", Content: text}, FinishReason: "tool_calls"}}
+		for i := range result.ToolCalls {
+			choices[0].ToolCalls = append(choices[0].ToolCalls, result.ToolCalls[i])
+		}
+	}
+
 	resp := ChatResponse{
 		ID:      "chatcmpl-" + uuidString(),
 		Object:  "chat.completion",
 		Created: time.Now().Unix(),
 		Model:   req.Model,
-		Choices: []Choice{{Index: 0, Message: &Message{Role: "assistant", Content: result}, FinishReason: "stop"}},
+		Choices: choices,
 		Usage:   Usage{},
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -487,12 +520,16 @@ func handleComboNonStream(w http.ResponseWriter, r *http.Request, req ChatReques
 
 			result, err := runWithPATRotation(r.Context(), patPool, modelKey, req.Messages, req.MaxTokens, nil, req.Tools, req.ThinkingEffort, req.ContextWindow)
 			if err == nil {
+				text := ""
+				if result != nil {
+					text = result.Text
+				}
 				resp := ChatResponse{
 					ID:      "chatcmpl-" + uuidString(),
 					Object:  "chat.completion",
 					Created: time.Now().Unix(),
 					Model:   comboName,
-					Choices: []Choice{{Index: 0, Message: &Message{Role: "assistant", Content: result}, FinishReason: "stop"}},
+					Choices: []Choice{{Index: 0, Message: &Message{Role: "assistant", Content: text}, FinishReason: "stop"}},
 					Usage:   Usage{},
 				}
 				w.Header().Set("Content-Type", "application/json")
@@ -624,7 +661,7 @@ func handleQuota(w http.ResponseWriter, r *http.Request) {
 
 // ── PAT rotation ────────────────────────────────────────────────────────────
 
-func runWithPATRotation(ctx context.Context, pool *PATPool, modelKey string, messages []ChatMessage, maxTokens int, onChunk StreamCallback, tools []ToolDef, thinkingEffort string, contextWindow int) (string, error) {
+func runWithPATRotation(ctx context.Context, pool *PATPool, modelKey string, messages []ChatMessage, maxTokens int, onChunk StreamCallback, tools []ToolDef, thinkingEffort string, contextWindow int) (*ChatResult, error) {
 	start := time.Now()
 
 	// Smart anti-ban delay: random jitter between 0 and requestDelay ms
@@ -725,9 +762,9 @@ done:
 	})
 
 	if lastErr != nil {
-		return "", lastErr
+		return nil, lastErr
 	}
-	return result.Text, nil
+	return result, nil
 }
 
 // upstreamStatusCode extracts HTTP status from an UpstreamError or guesses from error text.

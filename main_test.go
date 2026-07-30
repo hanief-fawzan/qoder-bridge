@@ -406,14 +406,147 @@ func TestProxyCount(t *testing.T) {
 // ── Env parsing tests ────────────────────────────────────────────────────
 
 func TestLoadEnvParsing(t *testing.T) {
-	// This tests env parsing logic by checking known patterns
-	// Cannot easily test file I/O without creating temp files, but
-	// validates the parsing function doesn't panic on edge cases
 	cfg := loadEnv("/nonexistent/.env")
 	if cfg.port != 7100 {
 		t.Errorf("default port: got %d, want 7100", cfg.port)
 	}
 	if cfg.strategy != "round-robin" {
 		t.Errorf("default strategy: got %q", cfg.strategy)
+	}
+}
+
+// ── Tool call parsing tests ──────────────────────────────────────────────
+
+func TestParseToolCallsFromText(t *testing.T) {
+	// Single tool call
+	text := `Let me search for that.
+
+` + "```tool_call" + `
+{"name": "web_search", "arguments": {"query": "hello world"}}
+` + "```" + `
+
+Done.`
+	calls, clean := parseToolCallsFromText(text)
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 tool call, got %d", len(calls))
+	}
+	if calls[0].Function.Name != "web_search" {
+		t.Errorf("name: got %q", calls[0].Function.Name)
+	}
+	if calls[0].ID == "" {
+		t.Error("tool call ID should not be empty")
+	}
+	if clean == text {
+		t.Error("tool_call block should be removed from clean text")
+	}
+}
+
+func TestParseToolCallsFromArray(t *testing.T) {
+	text := "Before\n\n" + "```tool_call" + `
+[{"name": "read_file", "arguments": {"path": "/tmp/a.go"}}, {"name": "terminal", "arguments": {"command": "ls"}}]
+` + "```" + `
+
+After.`
+	calls, clean := parseToolCallsFromText(text)
+	if len(calls) != 2 {
+		t.Fatalf("expected 2 tool calls, got %d", len(calls))
+	}
+	if calls[0].Function.Name != "read_file" {
+		t.Errorf("first name: got %q", calls[0].Function.Name)
+	}
+	if calls[1].Function.Name != "terminal" {
+		t.Errorf("second name: got %q", calls[1].Function.Name)
+	}
+	if strings.Contains(clean, "tool_call") {
+		t.Error("clean text should not contain tool_call blocks")
+	}
+	if !strings.Contains(clean, "Before") || !strings.Contains(clean, "After.") {
+		t.Error("surrounding text should be preserved")
+	}
+}
+
+func TestParseToolCallsNoCalls(t *testing.T) {
+	text := "Just a normal response without any tool calls."
+	calls, clean := parseToolCallsFromText(text)
+	if len(calls) != 0 {
+		t.Errorf("expected 0 calls, got %d", len(calls))
+	}
+	if clean != text {
+		t.Error("text should be unchanged when no tool calls")
+	}
+}
+
+func TestMapToToolCall(t *testing.T) {
+	// Valid
+	tc := mapToToolCall(map[string]interface{}{
+		"name":      "test_fn",
+		"arguments": map[string]interface{}{"x": 1},
+	})
+	if tc == nil {
+		t.Fatal("expected non-nil")
+	}
+	if tc.Function.Name != "test_fn" {
+		t.Errorf("name: got %q", tc.Function.Name)
+	}
+	if tc.Type != "function" {
+		t.Errorf("type: got %q", tc.Type)
+	}
+
+	// Missing name -> nil
+	tc2 := mapToToolCall(map[string]interface{}{})
+	if tc2 != nil {
+		t.Error("expected nil for missing name")
+	}
+}
+
+// ── Tool result + assistant preservation ──────────────────────────────────
+
+func TestNormalizeMessagesPreservesAssistant(t *testing.T) {
+	msgs := []ChatMessage{
+		{Role: "user", Content: "Hello"},
+		{Role: "assistant", Content: ""},
+		{Role: "user", Content: "Follow up"},
+	}
+	out, _ := normalizeMessages(msgs, nil)
+	// Assistant with empty content should still be preserved
+	assistantCount := 0
+	for _, m := range out {
+		if m.Role == "assistant" {
+			assistantCount++
+		}
+	}
+	if assistantCount != 1 {
+		t.Errorf("expected 1 assistant message preserved, got %d", assistantCount)
+	}
+}
+
+func TestNormalizeMessagesToolResult(t *testing.T) {
+	msgs := []ChatMessage{
+		{Role: "user", Content: "Search for X"},
+		{Role: "tool", Content: "Found: result123"},
+	}
+	out, _ := normalizeMessages(msgs, nil)
+	found := false
+	for _, m := range out {
+		if strings.Contains(extractText(m.Content), "Tool Result") {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("tool result should be converted to user message with [Tool Result] prefix")
+	}
+}
+
+func TestNormalizeMessagesToolsInSystemPrompt(t *testing.T) {
+	tools := []ToolDef{
+		{Function: ToolFunctionDef{Name: "read_file", Description: "Read a file", Parameters: map[string]interface{}{"path": "string"}}},
+	}
+	msgs := []ChatMessage{{Role: "user", Content: "test"}}
+	_, system := normalizeMessages(msgs, tools)
+	if !strings.Contains(system, "read_file") {
+		t.Error("system prompt should contain tool name")
+	}
+	if !strings.Contains(system, "Parameters:") {
+		t.Error("system prompt should contain parameters")
 	}
 }
