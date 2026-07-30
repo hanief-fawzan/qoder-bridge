@@ -333,11 +333,14 @@ Fallback chains — try first model, on error try next:
 ```env
 COMBO_FAST=efficient,lite
 COMBO_SMART=ultimate,Kimi-K3,DeepSeek-V4-Pro
+COMBO_QODER_PRIMARY=Kimi-K3,GLM-5.2,Qwen3.8-Max-Preview,efficient
 ```
 
 Use: `"model": "qd/combo-fast"` or `"model": "combo-fast"`
 
 Display names work inside combos too: `COMBO_SMART=ultimate,Kimi-K3,DeepSeek-V4-Pro`
+
+Underscores in combo names are auto-normalized to hyphens (`COMBO_QODER_PRIMARY` → `qd/combo-qoder-primary`).
 
 ---
 
