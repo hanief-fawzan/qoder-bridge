@@ -64,6 +64,15 @@ var frontierModels = map[string]string{
 	"mmodel":         "MiniMax-M3",
 }
 
+// Reverse map: display name -> internal key (built at init).
+var displayNameToKey = func() map[string]string {
+	m := make(map[string]string)
+	for k, v := range frontierModels {
+		m[strings.ToLower(v)] = k
+	}
+	return m
+}()
+
 // All known model keys for validation.
 var knownModelKeys = func() map[string]bool {
 	m := make(map[string]bool)
@@ -200,7 +209,7 @@ func handleModels(w http.ResponseWriter, r *http.Request) {
 	sort.Strings(keys)
 	for _, k := range keys {
 		models = append(models, ModelEntry{
-			ID: "qd/" + k, Object: "model", Created: 1, OwnedBy: "qoder",
+			ID: frontierModels[k], Object: "model", Created: 1, OwnedBy: "qoder",
 		})
 	}
 
@@ -516,6 +525,11 @@ func resolveModelKey(model string) string {
 		if prefix != "qd" && prefix != "qoder" {
 			log.Printf("model: prefix %q auto-converted to qd/ (using qd/%s)", prefix, m)
 		}
+	}
+
+	// Check if it's a display name (e.g. "DeepSeek-V4-Pro" → "dmodel")
+	if key, ok := displayNameToKey[m]; ok {
+		return key
 	}
 
 	return m
