@@ -156,6 +156,7 @@ type ChatRequest struct {
 	ToolChoice     interface{}   `json:"tool_choice,omitempty"`
 	ThinkingEffort string        `json:"thinking_effort,omitempty"` // low, medium, high, xhigh
 	ContextWindow  int           `json:"context_window,omitempty"`  // 200000, 400000, 1000000
+	ReasoningEffort string       `json:"reasoning_effort,omitempty"` // Hermes sends this (OpenAI standard)
 }
 
 type ChatResponse struct {
@@ -291,6 +292,11 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 
 	modelInput := req.Model
 	modelKey := resolveModelKey(modelInput)
+
+	// Resolve thinking effort (Hermes sends reasoning_effort, Qoder expects thinking_effort)
+	req.ThinkingEffort = resolveThinkingEffort(req)
+	// Resolve context window (auto-set based on model tier if not specified)
+	req.ContextWindow = resolveContextWindow(req, modelKey)
 
 	// Check if this is a combo request
 	if comboModels, isCombo := resolveCombo(modelInput); isCombo {
@@ -633,6 +639,54 @@ func resolveCombo(model string) ([]string, bool) {
 		return models, true
 	}
 	return nil, false
+}
+
+// resolveThinkingEffort resolves thinking effort from multiple sources.
+// Priority: thinking_effort > reasoning_effort (Hermes OpenAI standard).
+// Maps "ultra" → "xhigh" (Qoder max).
+func resolveThinkingEffort(req ChatRequest) string {
+	effort := req.ThinkingEffort
+	if effort == "" {
+		effort = req.ReasoningEffort
+	}
+	switch strings.ToLower(strings.TrimSpace(effort)) {
+	case "low":
+		return "low"
+	case "medium", "mid":
+		return "medium"
+	case "high":
+		return "high"
+	case "ultra", "xhigh", "max":
+		return "xhigh"
+	default:
+		return ""
+	}
+}
+
+// resolveContextWindow auto-sets context window based on model tier.
+// Source: https://docs.qoder.com/user-guide/chat/model-tier-selector
+// 200K=standard, 400K=extended, 1M=extreme
+func resolveContextWindow(req ChatRequest, modelKey string) int {
+	if req.ContextWindow > 0 {
+		return req.ContextWindow
+	}
+	// Auto-detect by model tier
+	switch modelKey {
+	case "kmodel_latest", "kmodel": // Kimi — supports 1M
+		return 1000000
+	case "qmodel_latest", "qmodel": // Qwen3.7-Max/Plus — supports 400K
+		return 400000
+	case "dmodel", "dfmodel": // DeepSeek — supports 400K
+		return 400000
+	case "gm51model": // GLM-5.2 — supports 1M
+		return 1000000
+	case "mmodel": // MiniMax-M3 — 1M context
+		return 1000000
+	case "qmodel_preview": // Qwen3.8-Max-Preview — 400K
+		return 400000
+	default: // tier models (auto, ultimate, etc.) — standard 200K
+		return 200000
+	}
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
