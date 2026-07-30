@@ -1,0 +1,69 @@
+#!/bin/bash
+# install.sh — Install qoder-bridge as a systemd user service
+# Run: bash install.sh
+set -e
+
+BRIDGE_DIR="$(cd "$(dirname "$0")" && pwd)"
+BIN="$HOME/.local/bin/qoder-bridge"
+SERVICE_DIR="$HOME/.config/systemd/user"
+SERVICE_FILE="$SERVICE_DIR/qoder-bridge.service"
+
+echo "Installing qoder-bridge..."
+
+# Build
+echo "  building..."
+cd "$BRIDGE_DIR"
+go build -o qoder-bridge . 2>/dev/null || { echo "FAILED: go build"; exit 1; }
+
+# Copy binary
+echo "  installing binary to $BIN..."
+mkdir -p "$HOME/.local/bin"
+cp qoder-bridge "$BIN"
+chmod +x "$BIN"
+
+# Create .env if missing
+if [ ! -f "$BRIDGE_DIR/.env" ]; then
+    echo "  creating .env from .env.example..."
+    cp "$BRIDGE_DIR/.env.example" "$BRIDGE_DIR/.env"
+    echo "  EDIT $BRIDGE_DIR/.env AND ADD YOUR PATs!"
+fi
+
+# Create systemd service
+echo "  creating systemd service..."
+mkdir -p "$SERVICE_DIR"
+cat > "$SERVICE_FILE" << EOF
+[Unit]
+Description=Qoder Bridge — OpenAI-compatible proxy for Qoder PATs
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=$BIN run -env $BRIDGE_DIR/.env
+Restart=on-failure
+RestartSec=5
+WorkingDirectory=$BRIDGE_DIR
+
+[Install]
+WantedBy=default.target
+EOF
+
+# Enable and start
+systemctl --user daemon-reload
+systemctl --user enable qoder-bridge
+systemctl --user restart qoder-bridge
+
+sleep 3
+
+if systemctl --user is-active --quiet qoder-bridge; then
+    echo ""
+    echo "qoder-bridge installed and running!"
+    echo ""
+    echo "  status:  qoder-bridge status"
+    echo "  logs:    journalctl --user -u qoder-bridge -f"
+    echo "  stop:    qoder-bridge stop"
+    echo "  update:  qoder-bridge update"
+else
+    echo ""
+    echo "qoder-bridge failed to start. Check logs:"
+    echo "  journalctl --user -u qoder-bridge --since '30 sec ago'"
+fi

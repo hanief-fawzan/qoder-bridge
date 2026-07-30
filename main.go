@@ -5,10 +5,12 @@
 //
 // Usage:
 //
-//	qoder-bridge                          # serve on port 7100
-//	qoder-bridge -port 8080               # custom port
+//	qoder-bridge                          # start daemon (background)
+//	qoder-bridge run                      # foreground mode (for systemd)
+//	qoder-bridge stop                     # stop daemon
+//	qoder-bridge status                   # check if running
+//	qoder-bridge update                   # pull, rebuild, restart
 //	qoder-bridge quota                    # check quota and exit
-//	qoder-bridge quota -env /path/.env    # check quota with custom .env
 package main
 
 import (
@@ -21,11 +23,14 @@ import (
 	"math/big"
 	"net/http"
 	"os"
+	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"text/tabwriter"
 	"time"
 )
@@ -33,11 +38,11 @@ import (
 // ── Config ──────────────────────────────────────────────────────────────────
 
 var (
-	port     int
-	pats     []string
-	patPool  *PATPool
-	combos   map[string][]string // combo name → model list
-	apiKey   string              // optional: sk-* API key for auth
+	port    int
+	pats    []string
+	patPool *PATPool
+	combos  map[string][]string // combo name -> model list
+	apiKey  string              // optional: sk-* API key for auth
 )
 
 // ── Models ──────────────────────────────────────────────────────────────────
@@ -475,7 +480,7 @@ func runWithPATRotation(ctx context.Context, pool *PATPool, modelKey string, mes
 		log.Printf("qd %s error: %v (pat: %s)", modelKey, err, maskPAT(pat))
 		if isAuthError(err) && pool.Len() > 1 {
 			pat2 := pool.Next()
-			log.Printf("pat rotation: %s → %s", maskPAT(pat), maskPAT(pat2))
+			log.Printf("pat rotation: %s -> %s", maskPAT(pat), maskPAT(pat2))
 			result, err = callQoder(ctx, pat2, modelKey, messages, maxTokens, onChunk)
 		}
 	}
@@ -494,16 +499,13 @@ func isAuthError(err error) bool {
 // ── Model & combo resolution ────────────────────────────────────────────────
 
 // resolveModelKey strips prefixes and normalizes a model name.
-// Accepts: "qd/auto", "QD/Auto", "qoder/auto", "auto", "apore/auto" → "auto"
+// Accepts: "qd/auto", "QD/Auto", "qoder/auto", "auto", "apore/auto" -> "auto"
 func resolveModelKey(model string) string {
-	// Lowercase everything
 	m := strings.ToLower(strings.TrimSpace(model))
 
-	// Strip any prefix up to and including "/"
 	if idx := strings.LastIndex(m, "/"); idx >= 0 {
 		prefix := m[:idx]
 		m = m[idx+1:]
-		// Log if prefix wasn't qd or qoder
 		if prefix != "qd" && prefix != "qoder" {
 			log.Printf("model: prefix %q auto-converted to qd/ (using qd/%s)", prefix, m)
 		}
@@ -521,12 +523,10 @@ func resolveCombo(model string) ([]string, bool) {
 
 	m := strings.ToLower(strings.TrimSpace(model))
 
-	// Strip prefix
 	if idx := strings.LastIndex(m, "/"); idx >= 0 {
 		m = m[idx+1:]
 	}
 
-	// Strip "combo-" prefix
 	m = strings.TrimPrefix(m, "combo-")
 	m = strings.TrimPrefix(m, "combo_")
 
@@ -599,10 +599,8 @@ func loadEnv(envPath string) *envConfig {
 			continue
 		}
 
-		// KEY=VALUE parsing
 		parts := strings.SplitN(line, "=", 2)
 		if len(parts) != 2 {
-			// Bare pt- line (legacy format)
 			if strings.HasPrefix(line, "pt-") {
 				cfg.pats = append(cfg.pats, line)
 			}
@@ -697,36 +695,57 @@ func runQuotaCLI(envPath string) {
 	w.Flush()
 }
 
-// ── Main ────────────────────────────────────────────────────────────────────
+// ── Daemon helpers ──────────────────────────────────────────────────────────
 
-func main() {
-	// Check for subcommand
-	if len(os.Args) > 1 && os.Args[1] == "quota" {
-		// Parse flags after "quota"
-		qfs := flag.NewFlagSet("quota", flag.ExitOnError)
-		envFlag := qfs.String("env", "", "Path to .env file")
-		qfs.Parse(os.Args[2:])
-		runQuotaCLI(*envFlag)
-		return
+func pidFilePath() string {
+	return filepath.Join(os.Getenv("HOME"), ".qoder-bridge.pid")
+}
+
+func logFilePath() string {
+	return filepath.Join(os.Getenv("HOME"), ".qoder-bridge.log")
+}
+
+func readPID() (int, error) {
+	data, err := os.ReadFile(pidFilePath())
+	if err != nil {
+		return 0, err
 	}
+	var pid int
+	_, err = fmt.Sscanf(strings.TrimSpace(string(data)), "%d", &pid)
+	return pid, err
+}
 
-	// Serve mode
-	envFlag := flag.String("env", "", "Path to .env file")
-	portFlag := flag.Int("port", 0, "Listen port (overrides QODER_PORT in .env)")
-	patsFlag := flag.String("pats", "", "Comma-separated PAT list (overrides .env)")
-	flag.Parse()
+func writePID(pid int) error {
+	return os.WriteFile(pidFilePath(), []byte(fmt.Sprintf("%d\n", pid)), 0644)
+}
+
+func removePID() {
+	os.Remove(pidFilePath())
+}
+
+func isRunning(pid int) bool {
+	err := syscall.Kill(pid, 0)
+	return err == nil
+}
+
+// ── Subcommands ─────────────────────────────────────────────────────────────
+
+func runServe(args []string) {
+	fs := flag.NewFlagSet("run", flag.ExitOnError)
+	envFlag := fs.String("env", "", "Path to .env file")
+	portFlag := fs.Int("port", 0, "Listen port (overrides QODER_PORT in .env)")
+	patsFlag := fs.String("pats", "", "Comma-separated PAT list (overrides .env)")
+	fs.Parse(args)
 
 	cfg := loadEnv(*envFlag)
 
 	// Initialize proxy-aware HTTP client after .env is loaded
 	initProxyClient()
 
-	// Override port from flag
 	if *portFlag > 0 {
 		cfg.port = *portFlag
 	}
 
-	// Override PATs from flag
 	if *patsFlag != "" {
 		cfg.pats = nil
 		for _, p := range strings.Split(*patsFlag, ",") {
@@ -740,16 +759,10 @@ func main() {
 	if len(cfg.pats) == 0 {
 		fmt.Fprintln(os.Stderr, "error: no PATs configured.")
 		fmt.Fprintln(os.Stderr, "")
-		fmt.Fprintln(os.Stderr, "Usage:")
-		fmt.Fprintln(os.Stderr, "  qoder-bridge -pats \"pt-xxx,pt-yyy\"")
-		fmt.Fprintln(os.Stderr, "  qoder-bridge -env /path/to/.env")
-		fmt.Fprintln(os.Stderr, "  QODER_PATS=pt-xxx,pt-yyy qoder-bridge")
-		fmt.Fprintln(os.Stderr, "")
-		fmt.Fprintln(os.Stderr, ".env format:")
+		fmt.Fprintln(os.Stderr, "Add PATs to .env file:")
 		fmt.Fprintln(os.Stderr, "  pt-your-first-pat-here")
 		fmt.Fprintln(os.Stderr, "  pt-your-second-pat-here")
 		fmt.Fprintln(os.Stderr, "  QODER_PORT=7100")
-		fmt.Fprintln(os.Stderr, "  PAT_STRATEGY=round-robin")
 		os.Exit(1)
 	}
 
@@ -774,7 +787,7 @@ func main() {
 			if len(uid) > 12 {
 				uid = uid[:12] + "..."
 			}
-			log.Printf("  ok: %s → user %s", maskPAT(pat), uid)
+			log.Printf("  ok: %s -> user %s", maskPAT(pat), uid)
 		}
 	}
 
@@ -804,7 +817,7 @@ func main() {
 		}
 		sort.Strings(comboNames)
 		for _, name := range comboNames {
-			log.Printf("  qd/combo-%s: %s", name, strings.Join(combos[name], " → "))
+			log.Printf("  qd/combo-%s: %s", name, strings.Join(combos[name], " -> "))
 		}
 	}
 
@@ -818,23 +831,265 @@ func main() {
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	log.Printf("")
 	log.Printf("qoder-bridge (cosy-pure-go)")
-	log.Printf("  ✓ ready on %s", addr)
+	log.Printf("  ready on %s", addr)
 	log.Printf("    chat:    http://%s/v1/chat/completions", addr)
 	log.Printf("    models:  http://%s/v1/models", addr)
 	log.Printf("    quota:   http://%s/v1/quota", addr)
 	log.Printf("    combos:  http://%s/v1/combos", addr)
 	log.Printf("    health:  http://%s/health", addr)
-	log.Printf("  ✓ engine:  pure Go COSY (no qodercli)")
-	log.Printf("  ✓ proxy:   %s", getProxyInfo())
+	log.Printf("  engine:  pure Go COSY (no qodercli)")
+	log.Printf("  proxy:   %s", getProxyInfo())
 	if apiKey != "" {
-		log.Printf("  ✓ apikey:  enabled (sk-*****)")
+		log.Printf("  apikey:  enabled (sk-*****)")
 	} else {
-		log.Printf("  ⚠ apikey:  disabled (no QODER_API_KEY in .env)")
+		log.Printf("  apikey:  disabled (no QODER_API_KEY in .env)")
 	}
 	log.Printf("")
 	log.Printf("ready to accept connections.")
 
+	// Handle graceful shutdown
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+	go func() {
+		sig := <-sigCh
+		log.Printf("received %v, shutting down...", sig)
+		removePID()
+		os.Exit(0)
+	}()
+
 	if err := http.ListenAndServe(addr, mux); err != nil {
 		log.Fatalf("listen: %v", err)
 	}
+}
+
+func runDaemonize(args []string) {
+	// Check if already running
+	if pid, err := readPID(); err == nil && isRunning(pid) {
+		fmt.Fprintf(os.Stderr, "qoder-bridge is already running (PID %d)\n", pid)
+		fmt.Fprintf(os.Stderr, "Stop with: qoder-bridge stop\n")
+		os.Exit(1)
+	}
+
+	removePID()
+
+	exe, err := os.Executable()
+	if err != nil {
+		log.Fatalf("cannot find executable: %v", err)
+	}
+
+	logFile := logFilePath()
+	f, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	if err != nil {
+		log.Fatalf("cannot open log file %s: %v", logFile, err)
+	}
+
+	childArgs := append([]string{"run"}, args...)
+
+	proc, err := os.StartProcess(exe, childArgs, &os.ProcAttr{
+		Dir:   ".",
+		Files: []*os.File{os.Stdin, f, f},
+		Sys:   &syscall.SysProcAttr{Setsid: true},
+	})
+	f.Close()
+	if err != nil {
+		log.Fatalf("cannot start daemon: %v", err)
+	}
+
+	writePID(proc.Pid)
+
+	// Wait for startup
+	time.Sleep(3 * time.Second)
+
+	if !isRunning(proc.Pid) {
+		fmt.Fprintf(os.Stderr, "qoder-bridge failed to start. Check logs:\n")
+		fmt.Fprintf(os.Stderr, "  tail -20 %s\n", logFile)
+		removePID()
+		os.Exit(1)
+	}
+
+	fmt.Printf("qoder-bridge started (PID %d)\n", proc.Pid)
+	fmt.Printf("  logs:    tail -f %s\n", logFile)
+	fmt.Printf("  stop:    qoder-bridge stop\n")
+	fmt.Printf("  status:  qoder-bridge status\n")
+}
+
+func runStop(args []string) {
+	pid, err := readPID()
+	if err != nil {
+		fmt.Println("qoder-bridge is not running (no PID file)")
+		os.Exit(1)
+	}
+
+	if !isRunning(pid) {
+		fmt.Printf("qoder-bridge is not running (stale PID %d)\n", pid)
+		removePID()
+		os.Exit(1)
+	}
+
+	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil {
+		fmt.Fprintf(os.Stderr, "cannot stop PID %d: %v\n", pid, err)
+		os.Exit(1)
+	}
+
+	for i := 0; i < 30; i++ {
+		time.Sleep(100 * time.Millisecond)
+		if !isRunning(pid) {
+			break
+		}
+	}
+
+	removePID()
+	fmt.Printf("qoder-bridge stopped (PID %d)\n", pid)
+}
+
+func runStatus(args []string) {
+	pid, err := readPID()
+	if err != nil {
+		fmt.Println("qoder-bridge is not running")
+		return
+	}
+
+	if !isRunning(pid) {
+		fmt.Printf("qoder-bridge is not running (stale PID %d)\n", pid)
+		removePID()
+		return
+	}
+
+	fmt.Printf("qoder-bridge is running (PID %d)\n", pid)
+	fmt.Printf("  logs:   tail -f %s\n", logFilePath())
+	fmt.Printf("  stop:   qoder-bridge stop\n")
+}
+
+func runUpdate(args []string) {
+	// Find project directory
+	projDir := ""
+	candidates := []string{
+		filepath.Join(os.Getenv("HOME"), "projects", "qoder-bridge"),
+		".",
+	}
+	for _, d := range candidates {
+		if _, err := os.Stat(filepath.Join(d, ".git")); err == nil {
+			projDir = d
+			break
+		}
+	}
+	if projDir == "" {
+		fmt.Fprintf(os.Stderr, "error: cannot find qoder-bridge git repo\n")
+		fmt.Fprintf(os.Stderr, "run from the project directory or clone to ~/projects/qoder-bridge\n")
+		os.Exit(1)
+	}
+
+	fmt.Printf("updating from %s...\n", projDir)
+
+	// git pull
+	fmt.Print("  git pull... ")
+	if err := runCmd(projDir, "git", "pull"); err != nil {
+		fmt.Printf("FAILED: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println("ok")
+
+	// go build
+	fmt.Print("  building... ")
+	if err := runCmd(projDir, "go", "build", "-o", "qoder-bridge", "."); err != nil {
+		fmt.Printf("FAILED: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println("ok")
+
+	// Copy binary
+	exe := filepath.Join(projDir, "qoder-bridge")
+	dest := filepath.Join(os.Getenv("HOME"), ".local", "bin", "qoder-bridge")
+	fmt.Printf("  installing to %s... ", dest)
+	if err := runCmd(projDir, "cp", exe, dest); err != nil {
+		fmt.Printf("FAILED: %v\n", err)
+		os.Exit(1)
+	}
+	runCmd(projDir, "chmod", "+x", dest)
+	fmt.Println("ok")
+
+	// Restart if running
+	pid, err := readPID()
+	if err == nil && isRunning(pid) {
+		fmt.Printf("  restarting (PID %d)... ", pid)
+		syscall.Kill(pid, syscall.SIGTERM)
+		time.Sleep(1 * time.Second)
+	} else {
+		fmt.Printf("  not running\n")
+	}
+
+	// Start new instance
+	if err := runCmd(".", dest); err != nil {
+		fmt.Printf("  start manually: %s\n", dest)
+	}
+
+	fmt.Println("update complete!")
+}
+
+func runCmd(dir string, name string, args ...string) error {
+	cmd := exec.Command(name, args...)
+	cmd.Dir = dir
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+func printUsage() {
+	fmt.Print(`qoder-bridge — OpenAI-compatible proxy for Qoder API
+
+Usage:
+  qoder-bridge                    Start as background daemon
+  qoder-bridge run                Run in foreground (for systemd)
+  qoder-bridge stop               Stop the daemon
+  qoder-bridge status             Check if running
+  qoder-bridge update             Pull, rebuild, restart
+  qoder-bridge quota              Check PAT quota
+  qoder-bridge help               Show this help
+
+Flags (for 'run' and default mode):
+  -env string       Path to .env file (default: ./.env or ~/.env)
+  -port int         Listen port (overrides QODER_PORT in .env)
+  -pats string      Comma-separated PAT list (overrides .env)
+
+Environment:
+  QODER_PROXY       Proxy URL (socks5://, http://, https://)
+
+Examples:
+  qoder-bridge                      Start daemon on port 7100
+  qoder-bridge run -port 8080       Run foreground on port 8080
+  qoder-bridge quota                Check quota for all PATs
+  qoder-bridge update               Update from git and restart
+`)
+}
+
+// ── Main ────────────────────────────────────────────────────────────────────
+
+func main() {
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "run":
+			runServe(os.Args[2:])
+		case "stop":
+			runStop(os.Args[2:])
+		case "status":
+			runStatus(os.Args[2:])
+		case "update":
+			runUpdate(os.Args[2:])
+		case "quota":
+			qfs := flag.NewFlagSet("quota", flag.ExitOnError)
+			envFlag := qfs.String("env", "", "Path to .env file")
+			qfs.Parse(os.Args[2:])
+			runQuotaCLI(*envFlag)
+		case "help", "-h", "--help":
+			printUsage()
+		default:
+			fmt.Fprintf(os.Stderr, "unknown command: %s\n\n", os.Args[1])
+			printUsage()
+			os.Exit(1)
+		}
+		return
+	}
+
+	// Default: daemonize
+	runDaemonize(os.Args[1:])
 }
