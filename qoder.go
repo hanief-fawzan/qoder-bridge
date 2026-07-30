@@ -351,27 +351,53 @@ func fetchQuota(pat string) QuotaInfo {
 
 // normalizeMessages hoists system messages out of the array and flattens
 // multipart content. Qoder rejects system messages inside the messages array.
-func normalizeMessages(messages []ChatMessage) ([]ChatMessage, string) {
+func normalizeMessages(messages []ChatMessage, tools []ToolDef) ([]ChatMessage, string) {
 	var systemParts []string
 	var out []ChatMessage
 	for _, m := range messages {
-		// Skip tool role messages — Qoder doesn't support tool calling
-		if m.Role == "tool" {
-			continue
-		}
 		text := extractText(m.Content)
-		if m.Role == "system" {
+		switch m.Role {
+		case "system":
 			if text != "" {
 				systemParts = append(systemParts, text)
 			}
 			continue
-		}
-		// Skip empty assistant messages (tool_calls-only messages have no text)
-		if m.Role == "assistant" && text == "" {
+		case "tool":
+			// Convert tool result to readable user message
+			toolName := "unknown"
+			if text != "" {
+				out = append(out, ChatMessage{
+					Role:    "user",
+					Content: "[Tool Result]\n" + text,
+				})
+			}
+			_ = toolName
 			continue
+		case "assistant":
+			if text == "" {
+				// Empty assistant message (tool_calls-only) — skip
+				continue
+			}
 		}
 		out = append(out, ChatMessage{Role: m.Role, Content: text})
 	}
+
+	// Inject tool definitions into system prompt
+	if len(tools) > 0 {
+		var toolParts []string
+		toolParts = append(toolParts, "You have access to the following tools. To call a tool, respond with a JSON block:")
+		toolParts = append(toolParts, "```tool_call\n{\"name\": \"tool_name\", \"arguments\": {...}}\n```")
+		toolParts = append(toolParts, "")
+		for _, t := range tools {
+			desc := t.Function.Description
+			if desc == "" {
+				desc = "(no description)"
+			}
+			toolParts = append(toolParts, fmt.Sprintf("- %s: %s", t.Function.Name, desc))
+		}
+		systemParts = append([]string{strings.Join(toolParts, "\n")}, systemParts...)
+	}
+
 	return out, strings.Join(systemParts, "\n\n")
 }
 
@@ -445,13 +471,13 @@ func truncate(s string, n int) string {
 }
 
 // buildQoderRequestBody creates the exact JSON payload Qoder expects.
-func buildQoderRequestBody(modelKey string, messages []ChatMessage, maxTokens int, creds *patCredential) ([]byte, error) {
+func buildQoderRequestBody(modelKey string, messages []ChatMessage, maxTokens int, creds *patCredential, tools []ToolDef) ([]byte, error) {
 	mc, err := getModelConfig(creds, modelKey)
 	if err != nil {
 		return nil, fmt.Errorf("model config: %w", err)
 	}
 
-	normalized, systemText := normalizeMessages(messages)
+	normalized, systemText := normalizeMessages(messages, tools)
 	lastUser := lastUserText(messages)
 	sessionID := stableHash("qoder-session", creds.userID, modelKey)
 	recordID := stableChatRecordID(modelKey, messages, maxTokens)
@@ -523,7 +549,7 @@ type StreamCallback func(text string)
 
 // callQoder sends a chat completion request directly to Qoder's API with
 // full COSY signing and WAF encoding. No qodercli required.
-func callQoder(ctx context.Context, pat, modelKey string, messages []ChatMessage, maxTokens int, onChunk StreamCallback) (*ChatResult, error) {
+func callQoder(ctx context.Context, pat, modelKey string, messages []ChatMessage, maxTokens int, onChunk StreamCallback, tools []ToolDef) (*ChatResult, error) {
 	// 1. Resolve credential (PAT → job token + userId)
 	cred, err := getCredential(pat)
 	if err != nil {
@@ -531,7 +557,7 @@ func callQoder(ctx context.Context, pat, modelKey string, messages []ChatMessage
 	}
 
 	// 2. Build request body (Qoder format)
-	payload, err := buildQoderRequestBody(modelKey, messages, maxTokens, cred)
+	payload, err := buildQoderRequestBody(modelKey, messages, maxTokens, cred, tools)
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
 	}

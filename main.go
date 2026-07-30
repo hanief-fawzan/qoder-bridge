@@ -136,11 +136,24 @@ type ChatMessage struct {
 	Content interface{} `json:"content"`
 }
 
+type ToolDef struct {
+	Type     string          `json:"type"`
+	Function ToolFunctionDef `json:"function"`
+}
+
+type ToolFunctionDef struct {
+	Name        string      `json:"name"`
+	Description string      `json:"description,omitempty"`
+	Parameters  interface{} `json:"parameters,omitempty"`
+}
+
 type ChatRequest struct {
-	Model     string        `json:"model"`
-	Messages  []ChatMessage `json:"messages"`
-	Stream    bool          `json:"stream"`
-	MaxTokens int           `json:"max_tokens,omitempty"`
+	Model      string        `json:"model"`
+	Messages   []ChatMessage `json:"messages"`
+	Stream     bool          `json:"stream"`
+	MaxTokens  int           `json:"max_tokens,omitempty"`
+	Tools      []ToolDef     `json:"tools,omitempty"`
+	ToolChoice interface{}   `json:"tool_choice,omitempty"`
 }
 
 type ChatResponse struct {
@@ -320,7 +333,7 @@ func handleStream(w http.ResponseWriter, r *http.Request, req ChatRequest, model
 				Choices: []SSEChoice{{Index: 0, Delta: json.RawMessage(`{"content":` + mustQuote(text) + `}`)}},
 			})
 		}
-	})
+	}, req.Tools)
 
 	if err != nil {
 		log.Printf("stream error: %v", err)
@@ -346,7 +359,7 @@ func handleStream(w http.ResponseWriter, r *http.Request, req ChatRequest, model
 }
 
 func handleNonStream(w http.ResponseWriter, r *http.Request, req ChatRequest, modelKey string) {
-	result, err := runWithPATRotation(r.Context(), patPool, modelKey, req.Messages, req.MaxTokens, nil)
+	result, err := runWithPATRotation(r.Context(), patPool, modelKey, req.Messages, req.MaxTokens, nil, req.Tools)
 	if err != nil {
 		sendJSONError(w, 502, err.Error())
 		return
@@ -375,7 +388,7 @@ func handleComboNonStream(w http.ResponseWriter, r *http.Request, req ChatReques
 		}
 		log.Printf("combo %q: trying qd/%s", comboName, modelKey)
 
-		result, err := runWithPATRotation(r.Context(), patPool, modelKey, req.Messages, req.MaxTokens, nil)
+		result, err := runWithPATRotation(r.Context(), patPool, modelKey, req.Messages, req.MaxTokens, nil, req.Tools)
 		if err == nil {
 			resp := ChatResponse{
 				ID:      "chatcmpl-" + uuidString(),
@@ -429,7 +442,7 @@ func handleComboStream(w http.ResponseWriter, r *http.Request, req ChatRequest, 
 					Choices: []SSEChoice{{Index: 0, Delta: json.RawMessage(`{"content":` + mustQuote(text) + `}`)}},
 				})
 			}
-		})
+		}, req.Tools)
 
 		if err == nil {
 			_ = result
@@ -485,7 +498,9 @@ func handleQuota(w http.ResponseWriter, r *http.Request) {
 
 // ── PAT rotation ────────────────────────────────────────────────────────────
 
-func runWithPATRotation(ctx context.Context, pool *PATPool, modelKey string, messages []ChatMessage, maxTokens int, onChunk StreamCallback) (string, error) {
+func runWithPATRotation(ctx context.Context, pool *PATPool, modelKey string, messages []ChatMessage, maxTokens int, onChunk StreamCallback, tools []ToolDef) (string, error) {
+	start := time.Now()
+
 	// Smart anti-ban delay: random jitter between 0 and requestDelay ms
 	if requestDelay > 0 {
 		n, err := rand.Int(rand.Reader, big.NewInt(int64(requestDelay)))
@@ -496,15 +511,60 @@ func runWithPATRotation(ctx context.Context, pool *PATPool, modelKey string, mes
 
 	pat := pool.Next()
 
-	result, err := callQoder(ctx, pat, modelKey, messages, maxTokens, onChunk)
+	result, err := callQoder(ctx, pat, modelKey, messages, maxTokens, onChunk, tools)
 	if err != nil {
 		log.Printf("qd %s error: %v (pat: %s)", modelKey, err, maskPAT(pat))
 		if isAuthError(err) && pool.Len() > 1 {
 			pat2 := pool.Next()
 			log.Printf("pat rotation: %s -> %s", maskPAT(pat), maskPAT(pat2))
-			result, err = callQoder(ctx, pat2, modelKey, messages, maxTokens, onChunk)
+			result, err = callQoder(ctx, pat2, modelKey, messages, maxTokens, onChunk, tools)
+			if err == nil {
+				pat = pat2
+			}
 		}
 	}
+
+	// Log to DB
+	latency := time.Since(start).Milliseconds()
+	promptTokens := 0
+	for _, m := range messages {
+		promptTokens += estimateTokens(extractText(m.Content))
+	}
+	completionTokens := 0
+	if err == nil && result != nil {
+		completionTokens = estimateTokens(result.Text)
+	}
+	totalTokens := promptTokens + completionTokens
+	credits := estimateCredits(modelKey, totalTokens)
+
+	status := 200
+	errMsg := ""
+	if err != nil {
+		status = 500
+		errMsg = err.Error()
+		if strings.Contains(errMsg, "403") {
+			status = 403
+		} else if strings.Contains(errMsg, "401") {
+			status = 401
+		} else if strings.Contains(errMsg, "credit") || strings.Contains(errMsg, "balance") {
+			status = 402
+		}
+	}
+
+	logRequest(LogEntry{
+		PAT:              maskPAT(pat),
+		Model:            modelKey,
+		Stream:           onChunk != nil,
+		PromptTokens:     promptTokens,
+		CompletionTokens: completionTokens,
+		TotalTokens:      totalTokens,
+		Credits:          credits,
+		Status:           status,
+		Error:            errMsg,
+		LatencyMs:        latency,
+		ClientIP:         "",
+	})
+
 	if err != nil {
 		return "", err
 	}
@@ -815,6 +875,37 @@ func runServe(args []string) {
 	}
 	if cfg.requestDelay > 0 {
 		requestDelay = cfg.requestDelay
+	}
+
+	// Initialize DB (optional — bridge works without it)
+	if err := initDB(); err != nil {
+		log.Printf("warn: db init failed: %v (logging disabled)", err)
+	} else {
+		// DB config overrides .env
+		if v := cfgGet("api_key"); v != "" {
+			apiKey = v
+		}
+		if v := cfgGet("proxy"); v != "" {
+			os.Setenv("QODER_PROXY", v)
+			initProxyClient()
+		}
+		if v := cfgGet("request_delay_ms"); v != "" {
+			var d int
+			if _, err := fmt.Sscanf(v, "%d", &d); err == nil && d > 0 {
+				requestDelay = d
+			}
+		}
+	}
+
+	// Enforce DB size limit (~100MB, 365 days)
+	if db != nil {
+		go func() {
+			ticker := time.NewTicker(1 * time.Hour)
+			defer ticker.Stop()
+			for range ticker.C {
+				enforceDBLimit(100)
+			}
+		}()
 	}
 
 	// Pre-warm credentials
@@ -1155,6 +1246,12 @@ func main() {
 			envFlag := qfs.String("env", "", "Path to .env file")
 			qfs.Parse(os.Args[2:])
 			runQuotaCLI(*envFlag)
+		case "config":
+			runConfigCLI(os.Args[2:])
+		case "usage":
+			runUsageCLI(os.Args[2:])
+		case "logs":
+			runLogsCLI(os.Args[2:])
 		case "help", "-h", "--help":
 			printUsage()
 		default:

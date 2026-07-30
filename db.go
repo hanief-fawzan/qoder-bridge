@@ -1,0 +1,315 @@
+// db.go — SQLite database layer for qoder-bridge.
+//
+// Uses modernc.org/sqlite (pure Go, no CGO) via database/sql.
+// Stores: request logs, token/credit usage per PAT, runtime config.
+package main
+
+import (
+	"database/sql"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"time"
+
+	_ "modernc.org/sqlite"
+)
+
+var (
+	db     *sql.DB
+	dbOnce sync.Once
+	dbPath string
+)
+
+// dbLocation returns the DB file path, creating parent dirs.
+func dbLocation() string {
+	if dbPath != "" {
+		return dbPath
+	}
+	dir := filepath.Join(os.Getenv("HOME"), ".qoder-bridge")
+	os.MkdirAll(dir, 0755)
+	dbPath = filepath.Join(dir, "data.db")
+	return dbPath
+}
+
+// initDB opens (or creates) the SQLite database and migrates schema.
+func initDB() error {
+	var err error
+	dbOnce.Do(func() {
+		db, err = sql.Open("sqlite", dbLocation()+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)")
+		if err != nil {
+			return
+		}
+		err = migrate(db)
+	})
+	return err
+}
+
+func migrate(d *sql.DB) error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS request_logs (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			ts INTEGER NOT NULL,
+			pat TEXT NOT NULL,
+			model TEXT NOT NULL,
+			stream INTEGER NOT NULL,
+			prompt_tokens INTEGER DEFAULT 0,
+			completion_tokens INTEGER DEFAULT 0,
+			total_tokens INTEGER DEFAULT 0,
+			credits REAL DEFAULT 0,
+			status INTEGER DEFAULT 0,
+			error TEXT DEFAULT '',
+			latency_ms INTEGER DEFAULT 0,
+			client_ip TEXT DEFAULT ''
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_logs_ts ON request_logs(ts)`,
+		`CREATE INDEX IF NOT EXISTS idx_logs_pat ON request_logs(pat)`,
+		`CREATE INDEX IF NOT EXISTS idx_logs_model ON request_logs(model)`,
+
+		`CREATE TABLE IF NOT EXISTS config (
+			key TEXT PRIMARY KEY,
+			value TEXT NOT NULL
+		)`,
+
+		// DB size guard: we aim for <100MB
+		`PRAGMA auto_vacuum=INCREMENTAL`,
+	}
+	for _, s := range stmts {
+		if _, err := d.Exec(s); err != nil {
+			return fmt.Errorf("migrate: %w", err)
+		}
+	}
+	return nil
+}
+
+// ── Config helpers ──────────────────────────────────────────────────────────
+
+func cfgGet(key string) string {
+	if db == nil {
+		return ""
+	}
+	var v string
+	db.QueryRow(`SELECT value FROM config WHERE key=?`, key).Scan(&v)
+	return v
+}
+
+func cfgSet(key, value string) {
+	if db == nil {
+		return
+	}
+	db.Exec(`INSERT INTO config(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, key, value)
+}
+
+func cfgBool(key string, def bool) bool {
+	v := cfgGet(key)
+	if v == "" {
+		return def
+	}
+	return v == "1" || v == "true" || v == "on"
+}
+
+// ── Logging ─────────────────────────────────────────────────────────────────
+
+type LogEntry struct {
+	PAT              string
+	Model            string
+	Stream           bool
+	PromptTokens     int
+	CompletionTokens int
+	TotalTokens      int
+	Credits          float64
+	Status           int
+	Error            string
+	LatencyMs        int64
+	ClientIP         string
+}
+
+func logRequest(e LogEntry) {
+	if db == nil {
+		return
+	}
+	stream := 0
+	if e.Stream {
+		stream = 1
+	}
+	db.Exec(`INSERT INTO request_logs(ts,pat,model,stream,prompt_tokens,completion_tokens,total_tokens,credits,status,error,latency_ms,client_ip)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+		time.Now().Unix(), e.PAT, e.Model, stream,
+		e.PromptTokens, e.CompletionTokens, e.TotalTokens, e.Credits,
+		e.Status, e.Error, e.LatencyMs, e.ClientIP)
+}
+
+// ── Usage queries ───────────────────────────────────────────────────────────
+
+type UsageRow struct {
+	PAT       string
+	Model     string
+	Requests  int
+	Tokens    int
+	Credits   float64
+	FirstTS   int64
+	LastTS    int64
+}
+
+func queryUsage(fromTS, toTS int64) ([]UsageRow, error) {
+	if db == nil {
+		return nil, fmt.Errorf("db not initialized")
+	}
+	rows, err := db.Query(`
+		SELECT pat, model, COUNT(*), SUM(total_tokens), SUM(credits), MIN(ts), MAX(ts)
+		FROM request_logs
+		WHERE ts >= ? AND ts <= ?
+		GROUP BY pat, model
+		ORDER BY pat, model`, fromTS, toTS)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []UsageRow
+	for rows.Next() {
+		var r UsageRow
+		if err := rows.Scan(&r.PAT, &r.Model, &r.Requests, &r.Tokens, &r.Credits, &r.FirstTS, &r.LastTS); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, nil
+}
+
+// ── DB size guard ───────────────────────────────────────────────────────────
+
+func dbSizeBytes() int64 {
+	fi, err := os.Stat(dbLocation())
+	if err != nil {
+		return 0
+	}
+	return fi.Size()
+}
+
+func enforceDBLimit(maxMB int) {
+	if db == nil {
+		return
+	}
+	maxBytes := int64(maxMB) * 1024 * 1024
+	if dbSizeBytes() < maxBytes {
+		return
+	}
+	// Delete oldest 20% of logs
+	var oldest int64
+	db.QueryRow(`SELECT ts FROM request_logs ORDER BY ts ASC LIMIT 1`).Scan(&oldest)
+	if oldest > 0 {
+		cutoff := oldest + (time.Now().Unix()-oldest)/5
+		db.Exec(`DELETE FROM request_logs WHERE ts < ?`, cutoff)
+		db.Exec(`PRAGMA incremental_vacuum`)
+	}
+}
+
+// ── Timezone helpers ────────────────────────────────────────────────────────
+
+var wib = time.FixedZone("WIB", 7*3600)
+
+func formatTS(ts int64) string {
+	t := time.Unix(ts, 0).In(wib)
+	return t.Format("02-01-2006 15:04:05 WIB")
+}
+
+func formatUTC(ts int64) string {
+	t := time.Unix(ts, 0).UTC()
+	return t.Format("02-01-2006 15:04:05 UTC")
+}
+
+// parseDateRange parses "today|week|month|year|custom" + optional "DD-MM-YYYY,DD-MM-YYYY"
+// Returns (fromTS, toTS, label).
+func parseDateRange(args []string) (int64, int64, string, error) {
+	now := time.Now().In(wib)
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, wib)
+
+	if len(args) == 0 {
+		return today.Unix(), now.Unix(), "today", nil
+	}
+
+	mode := strings.ToLower(args[0])
+	switch mode {
+	case "today":
+		return today.Unix(), now.Unix(), "today", nil
+	case "week", "thisweek":
+		weekday := int(now.Weekday())
+		if weekday == 0 {
+			weekday = 7
+		}
+		monday := today.AddDate(0, 0, -(weekday - 1))
+		return monday.Unix(), now.Unix(), "this week", nil
+	case "month", "thismonth":
+		first := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, wib)
+		return first.Unix(), now.Unix(), "this month", nil
+	case "year", "thisyear":
+		first := time.Date(now.Year(), 1, 1, 0, 0, 0, 0, wib)
+		return first.Unix(), now.Unix(), "this year", nil
+	case "custom":
+		if len(args) < 3 {
+			return 0, 0, "", fmt.Errorf("usage: custom DD-MM-YYYY DD-MM-YYYY")
+		}
+		from, err := time.ParseInLocation("02-01-2006", args[1], wib)
+		if err != nil {
+			return 0, 0, "", fmt.Errorf("bad from date: %v", err)
+		}
+		to, err := time.ParseInLocation("02-01-2006", args[2], wib)
+		if err != nil {
+			return 0, 0, "", fmt.Errorf("bad to date: %v", err)
+		}
+		to = to.Add(24*time.Hour - time.Second)
+		return from.Unix(), to.Unix(), fmt.Sprintf("%s to %s", args[1], args[2]), nil
+	default:
+		return 0, 0, "", fmt.Errorf("unknown range: %s (use today|week|month|year|custom)", mode)
+	}
+}
+
+// ── Credit multipliers (from Qoder docs) ────────────────────────────────────
+
+// Standard multipliers per model key. Time-based discounts not applied
+// in real-time (would require knowing exact UTC windows); we use standard
+// rates as the conservative baseline.
+var modelMultiplier = map[string]float64{
+	"auto":           1.0,
+	"ultimate":       1.0, // highest tier
+	"performance":    0.8,
+	"efficient":      0.5,
+	"lite":           0.1,
+	"qmodel_preview": 0.5,
+	"qmodel_latest":  0.5,
+	"qmodel":         0.1,
+	"kmodel_latest":  1.0,
+	"kmodel":         0.8,
+	"gm51model":      0.6,
+	"dmodel":         1.0,
+	"dfmodel":        0.3,
+	"mmodel":         0.5,
+}
+
+// estimateCredits returns estimated credits for a request.
+// Heuristic: 1 credit ≈ 1,000 tokens at 1x multiplier.
+func estimateCredits(modelKey string, totalTokens int) float64 {
+	mult, ok := modelMultiplier[modelKey]
+	if !ok {
+		mult = 1.0
+	}
+	if totalTokens <= 0 {
+		totalTokens = 1
+	}
+	return float64(totalTokens) / 1000.0 * mult
+}
+
+// estimateTokens is a rough tokenizer (chars/4).
+func estimateTokens(text string) int {
+	if text == "" {
+		return 0
+	}
+	// Rough heuristic: 1 token ≈ 4 characters for English/code
+	n := len(text) / 4
+	if n == 0 {
+		n = 1
+	}
+	return n
+}
