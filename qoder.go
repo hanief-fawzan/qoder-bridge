@@ -33,6 +33,7 @@ const (
 // ── Credential cache ────────────────────────────────────────────────────────
 
 type patCredential struct {
+	pat         string // original PAT (pt-...)
 	accessToken string // job token (jt-...)
 	userID      string
 	machineID   string
@@ -73,6 +74,7 @@ func resolveCredential(pat string) (*patCredential, error) {
 	}
 
 	return &patCredential{
+		pat:         pat,
 		accessToken: jt,
 		userID:      userID,
 		machineID:   uuidString(),
@@ -140,6 +142,11 @@ func fetchUserID(jobToken string) (string, error) {
 		return "", err
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		b, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("userinfo %d: %s", resp.StatusCode, string(b))
+	}
 
 	var info struct {
 		ID     string `json:"id"`
@@ -219,7 +226,7 @@ func fetchModelConfig(cred *patCredential, modelKey string, retry bool) (*modelC
 	if resp.StatusCode != 200 {
 		b, _ := io.ReadAll(resp.Body)
 		if retry && (resp.StatusCode == 401 || resp.StatusCode == 403) {
-			credCache.Delete(cred.accessToken)
+			credCache.Delete(cred.pat)
 		}
 		return nil, fmt.Errorf("model list %d: %s", resp.StatusCode, string(b))
 	}
@@ -635,6 +642,10 @@ func unwrapQoderSSE(body io.Reader, onChunk StreamCallback) (string, error) {
 				}
 			}
 		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return full.String(), err
 	}
 
 	return full.String(), nil

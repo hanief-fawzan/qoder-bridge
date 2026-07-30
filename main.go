@@ -108,7 +108,10 @@ func (p *PATPool) Next() string {
 		return ""
 	}
 	if p.strategy == "random" {
-		n, _ := rand.Int(rand.Reader, big.NewInt(int64(len(p.pats))))
+		n, err := rand.Int(rand.Reader, big.NewInt(int64(len(p.pats))))
+		if err != nil {
+			return p.pats[0]
+		}
 		return p.pats[n.Int64()]
 	}
 	pat := p.pats[p.idx%len(p.pats)]
@@ -262,7 +265,7 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 
 	var req ChatRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, fmt.Sprintf(`{"error":{"message":"bad request: %s"}}`, err), 400)
+		sendJSONError(w, 400, fmt.Sprintf("bad request: %s", err))
 		return
 	}
 
@@ -345,7 +348,7 @@ func handleStream(w http.ResponseWriter, r *http.Request, req ChatRequest, model
 func handleNonStream(w http.ResponseWriter, r *http.Request, req ChatRequest, modelKey string) {
 	result, err := runWithPATRotation(r.Context(), patPool, modelKey, req.Messages, req.MaxTokens, nil)
 	if err != nil {
-		http.Error(w, fmt.Sprintf(`{"error":{"message":"%s"}}`, err), 502)
+		sendJSONError(w, 502, err.Error())
 		return
 	}
 
@@ -389,7 +392,7 @@ func handleComboNonStream(w http.ResponseWriter, r *http.Request, req ChatReques
 		lastErr = err
 		log.Printf("combo %q: qd/%s failed: %v", comboName, modelKey, err)
 	}
-	http.Error(w, fmt.Sprintf(`{"error":{"message":"combo %s: all models failed, last error: %s"}}`, comboName, lastErr), 502)
+	sendJSONError(w, 502, fmt.Sprintf("combo %s: all models failed, last error: %s", comboName, lastErr))
 }
 
 func handleComboStream(w http.ResponseWriter, r *http.Request, req ChatRequest, comboName string, modelList []string) {
@@ -485,8 +488,10 @@ func handleQuota(w http.ResponseWriter, r *http.Request) {
 func runWithPATRotation(ctx context.Context, pool *PATPool, modelKey string, messages []ChatMessage, maxTokens int, onChunk StreamCallback) (string, error) {
 	// Smart anti-ban delay: random jitter between 0 and requestDelay ms
 	if requestDelay > 0 {
-		n, _ := rand.Int(rand.Reader, big.NewInt(int64(requestDelay)))
-		time.Sleep(time.Duration(n.Int64()) * time.Millisecond)
+		n, err := rand.Int(rand.Reader, big.NewInt(int64(requestDelay)))
+		if err == nil {
+			time.Sleep(time.Duration(n.Int64()) * time.Millisecond)
+		}
 	}
 
 	pat := pool.Next()
@@ -577,6 +582,12 @@ func sendSSE(w http.ResponseWriter, f http.Flusher, chunk SSEChunk) {
 	b, _ := json.Marshal(chunk)
 	fmt.Fprintf(w, "data: %s\n\n", string(b))
 	f.Flush()
+}
+
+func sendJSONError(w http.ResponseWriter, code int, msg string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	json.NewEncoder(w).Encode(map[string]interface{}{"error": map[string]string{"message": msg}})
 }
 
 // ── .env loader ─────────────────────────────────────────────────────────────
@@ -682,8 +693,8 @@ func loadEnv(envPath string) *envConfig {
 				os.Setenv("QODER_PROXY", val)
 			}
 
-		case strings.HasPrefix(line, "pt-"):
-			cfg.pats = append(cfg.pats, line)
+		case strings.HasPrefix(key, "pt-"):
+			cfg.pats = append(cfg.pats, key)
 		}
 	}
 

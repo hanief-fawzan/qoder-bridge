@@ -3,7 +3,7 @@
 > **Pure-Go OpenAI-compatible proxy for [Qoder](https://qoder.com) API.**
 > Zero dependencies. Zero cold start. Just works.
 
-**v1 Stable** — this is a stable release. Expect minimal updates going forward.
+**v1.0.0 Stable** — this is a stable release. Expect minimal updates going forward.
 
 Uses COSY signing (RSA-2048 + AES-128-CBC + MD5) directly — **no qodercli, no Node.js, no npm, no WASM.**
 
@@ -129,10 +129,11 @@ PAT_STRATEGY=round-robin
 # ── Combos (optional) ─────────────────────────────────
 # Format: COMBO_<NAME>=model1,model2,model3
 # First model is primary. On error, tries the next.
-# Models are auto-prefixed with qd/ (case-insensitive).
+# Models auto-prefix with qd/ (case-insensitive).
+# Display names also work: Kimi-K3, DeepSeek-V4-Pro, etc.
 COMBO_FAST=efficient,lite
-COMBO_SMART=ultimate,qmodel_preview,dmodel
-COMBO_CHEAP=lite,efficient,dfmodel
+COMBO_SMART=ultimate,Kimi-K3,DeepSeek-V4-Pro
+COMBO_CHEAP=lite,efficient,DeepSeek-V4-Flash
 COMBO_DEFAULT=auto,ultimate,performance
 
 # ── Proxy (optional) ─────────────────────────────────
@@ -180,6 +181,17 @@ curl -N http://127.0.0.1:7100/v1/chat/completions \
     "model": "qd/auto",
     "messages": [{"role": "user", "content": "Count to 5"}],
     "stream": true
+  }'
+```
+
+**Use display names directly:**
+
+```bash
+curl http://127.0.0.1:7100/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "Kimi-K3",
+    "messages": [{"role": "user", "content": "Write hello world"}]
   }'
 ```
 
@@ -237,7 +249,7 @@ All models use the `qd/` prefix. Prefix is **case-insensitive** — `QD/Auto`, `
 | `qd/dfmodel` | DeepSeek-V4-Flash | Fast |
 | `qd/mmodel` | MiniMax-M3 | General |
 
-> 💡 **Model aliases:** Any prefix works. `qd/auto`, `qoder/auto`, `QD/Auto`, even `apore/auto` — all resolve to `auto`. If prefix isn't `qd` or `qoder`, a warning is logged but the model still works.
+> 💡 **Display names work everywhere:** Send `"model": "Kimi-K3"` and the bridge auto-maps to `qd/kmodel_latest`. Both internal keys (`qd/dmodel`) and display names (`DeepSeek-V4-Pro`) are accepted. `/v1/models` shows the display names.
 
 ---
 
@@ -249,8 +261,8 @@ Combos are **fallback chains** — try the first model, and if it fails, automat
 
 ```env
 COMBO_FAST=efficient,lite
-COMBO_SMART=ultimate,qmodel_preview,dmodel
-COMBO_CHEAP=lite,efficient,dfmodel
+COMBO_SMART=ultimate,Kimi-K3,DeepSeek-V4-Pro
+COMBO_CHEAP=lite,efficient,DeepSeek-V4-Flash
 COMBO_DEFAULT=auto,ultimate,performance
 ```
 
@@ -274,12 +286,12 @@ curl ... -d '{"model": "COMBO_FAST", ...}'
 ```
 Request: qd/combo-smart
   → try qd/ultimate ... ❌ error
-  → try qd/qmodel_preview ... ✅ success → return response
+  → try Kimi-K3 (→ kmodel_latest) ... ✅ success → return response
 ```
 
-If **all models fail**, returns the last error.
+If **all models fail**, returns the last error. Unknown model names are still tried (Qoder may add new models) — a warning is logged.
 
-Unknown model names in combos are **tried anyway** (Qoder may add new models) — a warning is logged but execution continues.
+> 💡 **Display names in combos:** You can use `Kimi-K3`, `DeepSeek-V4-Pro`, etc. inside combo definitions. The bridge auto-maps them to internal keys.
 
 ---
 
@@ -434,15 +446,15 @@ providers:
       - qd/performance
       - qd/efficient
       - qd/lite
-      - qd/qmodel_preview
-      - qd/qmodel_latest
-      - qd/qmodel
-      - qd/kmodel_latest
-      - qd/kmodel
-      - qd/gm51model
-      - qd/dmodel
-      - qd/dfmodel
-      - qd/mmodel
+      - Qwen3.8-Max-Preview
+      - Qwen3.7-Max
+      - Qwen3.7-Plus
+      - Kimi-K3
+      - Kimi-K2.7-Code
+      - GLM-5.2
+      - DeepSeek-V4-Pro
+      - DeepSeek-V4-Flash
+      - MiniMax-M3
       - qd/combo-fast
       - qd/combo-smart
       - qd/combo-cheap
@@ -458,7 +470,7 @@ providers:
 ./qoder-bridge update
 ```
 
-This pulls from git, rebuilds, copies binary, and restarts.
+This stops the service, pulls from git, rebuilds, copies binary, and restarts.
 
 ### Restart after changing `.env`
 
@@ -511,7 +523,7 @@ tail -f ~/.qoder-bridge.log
 go build -o qoder-bridge .
 ```
 
-Requires **Go 1.21+**. Zero external dependencies — pure Go stdlib + `golang.org/x/net` (SOCKS5 only).
+Requires **Go 1.21+**. One external dependency (`golang.org/x/net` for SOCKS5 proxy support).
 
 ---
 

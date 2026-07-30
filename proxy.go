@@ -117,7 +117,10 @@ func buildSocks5Client(u *url.URL) (*http.Client, string) {
 	return &http.Client{
 		Transport: &http.Transport{
 			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-				return dialer.(contextDialer).DialContext(ctx, network, addr)
+				if cd, ok := dialer.(contextDialer); ok {
+					return cd.DialContext(ctx, network, addr)
+				}
+				return dialer.Dial(network, addr)
 			},
 		},
 		Timeout: 5 * time.Minute,

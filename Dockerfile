@@ -8,4 +8,4 @@ RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /qoder-bridge .
 FROM alpine:3.22
 COPY --from=build /qoder-bridge /usr/local/bin/qoder-bridge
 EXPOSE 7100
-ENTRYPOINT ["qoder-bridge"]
+ENTRYPOINT ["qoder-bridge", "run"]
