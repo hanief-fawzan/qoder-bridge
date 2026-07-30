@@ -209,16 +209,18 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 
 func handleModels(w http.ResponseWriter, r *http.Request) {
 	type ModelEntry struct {
-		ID      string `json:"id"`
-		Object  string `json:"object"`
-		Created int64  `json:"created"`
-		OwnedBy string `json:"owned_by"`
+		ID            string `json:"id"`
+		Object        string `json:"object"`
+		Created       int64  `json:"created"`
+		OwnedBy       string `json:"owned_by"`
+		ContextLength int    `json:"context_length,omitempty"`
 	}
 
 	models := []ModelEntry{}
 	for _, t := range tierModels {
 		models = append(models, ModelEntry{
 			ID: "qd/" + t, Object: "model", Created: 1, OwnedBy: "qoder",
+			ContextLength: modelContextSize(t),
 		})
 	}
 	keys := make([]string, 0, len(frontierModels))
@@ -229,6 +231,7 @@ func handleModels(w http.ResponseWriter, r *http.Request) {
 	for _, k := range keys {
 		models = append(models, ModelEntry{
 			ID: frontierModels[k], Object: "model", Created: 1, OwnedBy: "qoder",
+			ContextLength: modelContextSize(k),
 		})
 	}
 
@@ -242,12 +245,34 @@ func handleModels(w http.ResponseWriter, r *http.Request) {
 		for _, name := range comboNames {
 			models = append(models, ModelEntry{
 				ID: "qd/combo-" + name, Object: "model", Created: 1, OwnedBy: "qoder-combo",
+				ContextLength: 200000,
 			})
 		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{"object": "list", "data": models})
+}
+
+// modelContextSize returns the max context window for a model key.
+// Used in /v1/models response so Hermes auto-detects the right context length.
+func modelContextSize(modelKey string) int {
+	switch modelKey {
+	case "kmodel_latest", "kmodel": // Kimi
+		return 1000000
+	case "gm51model": // GLM-5.2
+		return 1000000
+	case "mmodel": // MiniMax-M3
+		return 1000000
+	case "qmodel_latest", "qmodel": // Qwen3.7-Max/Plus
+		return 400000
+	case "qmodel_preview": // Qwen3.8-Max-Preview
+		return 400000
+	case "dmodel", "dfmodel": // DeepSeek
+		return 400000
+	default: // tier models (auto, ultimate, etc.)
+		return 200000
+	}
 }
 
 func handleCombos(w http.ResponseWriter, r *http.Request) {
