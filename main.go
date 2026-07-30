@@ -1197,8 +1197,23 @@ func runStop(args []string) {
 }
 
 func runRestart(args []string) {
+	// Try systemd restart first (matches install.sh)
+	for _, cmd := range [][]string{
+		{"systemctl", "restart", "qoder-bridge"},
+		{"systemctl", "--user", "restart", "qoder-bridge"},
+	} {
+		if err := exec.Command(cmd[0], cmd[1:]...).Run(); err == nil {
+			time.Sleep(2 * time.Second)
+			statusOut, _ := exec.Command(cmd[0], "is-active", "qoder-bridge").CombinedOutput()
+			if strings.TrimSpace(string(statusOut)) == "active" {
+				fmt.Printf("qoder-bridge restarted (systemd: %s)\n", cmd[0])
+				return
+			}
+		}
+	}
+
+	// Fallback: PID-file daemon mode
 	runStop(nil)
-	// Small wait for port release
 	time.Sleep(500 * time.Millisecond)
 	runDaemonize(args)
 }
