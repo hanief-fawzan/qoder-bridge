@@ -573,4 +573,10 @@ func TestNormalizeMessagesToolsInSystemPrompt(t *testing.T) {
 	if !strings.Contains(system, "tool_calls") {
 		t.Error("system prompt should mention tool_calls format")
 	}
+	if !strings.Contains(system, "Available tools") {
+		t.Error("system prompt should contain English instructions")
+	}
+	if !strings.Contains(system, "如需调用工具") {
+		t.Error("system prompt should contain Chinese instructions")
+	}
 }

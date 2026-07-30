@@ -420,17 +420,17 @@ func normalizeMessages(messages []ChatMessage, tools []ToolDef) ([]ChatMessage, 
 			toolDescriptions = append(toolDescriptions, desc)
 		}
 		toolJSON, _ := json.MarshalIndent(toolDescriptions, "", "  ")
-		toolPrompt := fmt.Sprintf(`[Tool Protocol] 以下工具可供调用：
+		toolPrompt := fmt.Sprintf(`[Tool Protocol] Available tools:
 
 %s
 
-如需调用工具，请仅输出以下格式的 JSON 代码块：
+To call a tool, respond with a JSON code block ONLY:
 ` + "```" + `json
-{"tool_calls": [{"name": "工具名称", "arguments": {参数对象}}]}
+{"tool_calls": [{"name": "tool_name", "arguments": {}}]}
 ` + "```" + `
 
-如不需要调用工具，直接以正常文本回复，不要输出任何 JSON 代码块。
-不要在同一个回复中既输出普通文本又输出工具调用 JSON。`, string(toolJSON))
+If no tool is needed, respond with normal text. Do NOT output both text and tool calls.
+如需调用工具，仅输出以上 JSON 代码块。如不需要，直接回复文本。`, string(toolJSON))
 		systemParts = append([]string{toolPrompt}, systemParts...)
 	}
 
@@ -506,14 +506,15 @@ func truncate(s string, n int) string {
 	return s
 }
 
+// Regex for ```json ... ``` blocks — compiled once at package level.
+var jsonBlockRe = regexp.MustCompile("(?s)```json\\s*\\n([\\s\\S]*?)\\n```")
+
 // parseToolCallsFromText extracts tool_calls from Qoder text response.
 // Handles two formats:
 //  1. ```json\n{"tool_calls": [...]}\n```  (preferred, matching qoder-proxy)
 //  2. Balanced JSON extraction with brace counting (fallback)
 // Returns parsed tool_calls and clean text with tool_call blocks removed.
 func parseToolCallsFromText(text string) ([]ToolCall, string) {
-	// Format 1: ```json ... ``` block
-	jsonBlockRe := regexp.MustCompile("(?s)```json\\s*\\n([\\s\\S]*?)\\n```")
 	blockMatch := jsonBlockRe.FindStringSubmatchIndex(text)
 
 	var jsonString string

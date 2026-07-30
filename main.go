@@ -562,12 +562,17 @@ func handleComboNonStream(w http.ResponseWriter, r *http.Request, req ChatReques
 				if result != nil {
 					text = result.Text
 				}
+				choices := []Choice{{Index: 0, Message: &Message{Role: "assistant", Content: text}, FinishReason: "stop"}}
+				if result != nil && len(result.ToolCalls) > 0 {
+					choices = []Choice{{Index: 0, Message: &Message{Role: "assistant", Content: text}, FinishReason: "tool_calls"}}
+					choices[0].ToolCalls = result.ToolCalls
+				}
 				resp := ChatResponse{
 					ID:      "chatcmpl-" + uuidString(),
 					Object:  "chat.completion",
 					Created: time.Now().Unix(),
 					Model:   comboName,
-					Choices: []Choice{{Index: 0, Message: &Message{Role: "assistant", Content: text}, FinishReason: "stop"}},
+					Choices: choices,
 					Usage:   Usage{},
 				}
 				w.Header().Set("Content-Type", "application/json")
@@ -631,11 +636,39 @@ comboRounds:
 			if err == nil {
 				_ = result
 				if flusher != nil {
-					stop := "stop"
-					sendSSE(w, flusher, SSEChunk{
-						ID: id, Object: "chat.completion.chunk", Created: created, Model: comboName,
-						Choices: []SSEChoice{{Index: 0, Delta: json.RawMessage(`{}`), FinishReason: &stop}},
-					})
+					// Emit tool_calls if present
+					if result != nil && len(result.ToolCalls) > 0 {
+						if !roleSent {
+							sendSSE(w, flusher, SSEChunk{
+								ID: id, Object: "chat.completion.chunk", Created: created, Model: comboName,
+								Choices: []SSEChoice{{Index: 0, Delta: json.RawMessage(`{"role":"assistant"}`)}},
+							})
+							roleSent = true
+						}
+						for _, tc := range result.ToolCalls {
+							tcDelta, _ := json.Marshal(map[string]interface{}{
+								"index": 0, "id": tc.ID, "type": "function",
+								"function": map[string]interface{}{
+									"name": tc.Function.Name, "arguments": tc.Function.Arguments,
+								},
+							})
+							sendSSE(w, flusher, SSEChunk{
+								ID: id, Object: "chat.completion.chunk", Created: created, Model: comboName,
+								Choices: []SSEChoice{{Index: 0, Delta: json.RawMessage(`{"tool_calls":[` + string(tcDelta) + `]}`)}},
+							})
+						}
+						reason := "tool_calls"
+						sendSSE(w, flusher, SSEChunk{
+							ID: id, Object: "chat.completion.chunk", Created: created, Model: comboName,
+							Choices: []SSEChoice{{Index: 0, Delta: json.RawMessage(`{}`), FinishReason: &reason}},
+						})
+					} else {
+						stop := "stop"
+						sendSSE(w, flusher, SSEChunk{
+							ID: id, Object: "chat.completion.chunk", Created: created, Model: comboName,
+							Choices: []SSEChoice{{Index: 0, Delta: json.RawMessage(`{}`), FinishReason: &stop}},
+						})
+					}
 					fmt.Fprintf(w, "data: [DONE]\n\n")
 					flusher.Flush()
 				}
