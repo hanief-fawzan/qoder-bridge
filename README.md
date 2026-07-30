@@ -342,6 +342,43 @@ Underscores in combo names are auto-normalized to hyphens (`COMBO_QODER_PRIMARY`
 
 ---
 
+## 💰 Qoder Pricing & Usage
+
+Qoder uses a **credit-based system** with model multipliers:
+
+| Category | Models | Multiplier |
+|----------|--------|:----------:|
+| 🏷️ Tier | auto, ultimate, performance, efficient, lite | Varies per tier |
+| 🌐 Frontier | Each model has its own multiplier | Varies |
+
+- **Pro Trial** accounts get credits that may show as `0` — this is normal (usage is unlimited/uncounted during trial).
+- Credits **reset monthly**.
+- Check your quota via API or CLI (see below).
+
+### 📊 Check quota via API
+
+```bash
+curl http://127.0.0.1:7100/v1/quota
+```
+
+### 📊 Check quota via CLI
+
+```bash
+./qoder-bridge quota
+```
+
+Output example:
+
+```
+Fetching quota for 2 PAT(s)...
+
+PAT             USED   REMAINING   LIMIT    RESET                STATUS
+pt-7J45...8ab2  0      0           0        2026-08-10           ok
+pt-QaO1...0a52  0      0           0        2026-08-10           ok
+```
+
+---
+
 ## 🌐 Proxy
 
 ```env

@@ -591,12 +591,11 @@ func tuiRunUpdate() string {
 	}
 	sb.WriteString("build... ok\n")
 
-	// Stop running daemon BEFORE copying (binary in use on Linux can be replaced,
-	// but stop first so restart picks up new binary)
+	// Stop running daemon BEFORE copying
 	sb.WriteString("stopping daemon...\n")
 	stopOut, _ := exec.Command(bridgeExe(), "stop").CombinedOutput()
 	sb.WriteString(fmt.Sprintf("%s\n", strings.TrimSpace(string(stopOut))))
-	time.Sleep(500 * time.Millisecond)
+	time.Sleep(2 * time.Second)
 
 	// Copy binary — find actual install location
 	dest := ""
@@ -616,9 +615,19 @@ func tuiRunUpdate() string {
 	}
 
 	exe := filepath.Join(projDir, "qoder-bridge")
-	cpOut, err := exec.Command("cp", exe, dest).CombinedOutput()
+	// Atomic rename: copy to .tmp, then mv over old file.
+	// mv (rename syscall) atomically replaces the directory entry.
+	// Old processes keep the old inode. Avoids "Text file busy".
+	tmpDest := dest + ".tmp"
+	cpOut, err := exec.Command("cp", exe, tmpDest).CombinedOutput()
 	if err != nil {
+		os.Remove(tmpDest)
 		sb.WriteString(fmt.Sprintf("install FAILED: %v\n%s\n", err, string(cpOut)))
+		return sb.String()
+	}
+	if err := os.Rename(tmpDest, dest); err != nil {
+		os.Remove(tmpDest)
+		sb.WriteString(fmt.Sprintf("install FAILED (rename): %v\n", err))
 		return sb.String()
 	}
 	sb.WriteString(fmt.Sprintf("installed to %s\n", dest))
