@@ -280,26 +280,42 @@ func parseDateRange(args []string) (int64, int64, string, error) {
 }
 
 // ── Credit multipliers (from Qoder docs) ────────────────────────────────────
-
-// Standard multipliers per model key. Time-based discounts not applied
-// in real-time (would require knowing exact UTC windows); we use standard
-// rates as the conservative baseline.
+// Source: https://docs.qoder.com/user-guide/chat/model-tier-selector
+//
+// Tier multipliers: Auto=1.0x, Ultimate=1.6x, Performance=1.1x, Efficient=0.3x, Lite=Free
+// Frontier: Qwen3.7-Max=0.5x, Qwen3.7-Plus=0.1x, DeepSeek-V4-Pro=0.5x,
+//   DeepSeek-V4-Flash=0.1x, GLM-5.2=0.6x, Kimi-K2.7-Code=0.3x, MiniMax-M3=0.2x
+//
+// Time-based discounts (Off-Peak 14:00–00:00 UTC) not applied in real-time;
+// we use standard rates as the conservative baseline.
 var modelMultiplier = map[string]float64{
-	"auto":           1.0,
-	"ultimate":       1.0, // highest tier
-	"performance":    0.8,
-	"efficient":      0.5,
-	"lite":           0.1,
-	"qmodel_preview": 0.5,
-	"qmodel_latest":  0.5,
-	"qmodel":         0.1,
-	"kmodel_latest":  1.0,
-	"kmodel":         0.8,
-	"gm51model":      0.6,
-	"dmodel":         1.0,
-	"dfmodel":        0.3,
-	"mmodel":         0.5,
+	"auto":           1.0,  // Auto: smart routing
+	"ultimate":       1.6,  // Ultimate: deep reasoning
+	"performance":    1.1,  // Performance: advanced reasoning
+	"efficient":      0.3,  // Efficient: standard reasoning
+	"lite":           0.0,  // Lite: free
+	"qmodel_preview": 0.5,  // Qwen3.8-Max-Preview (not in tier selector, uses 0.5x standard)
+	"qmodel_latest":  0.5,  // Qwen3.7-Max
+	"qmodel":         0.1,  // Qwen3.7-Plus
+	"kmodel_latest":  1.0,  // Kimi-K3 (not in docs, estimated)
+	"kmodel":         0.3,  // Kimi-K2.7-Code
+	"gm51model":      0.6,  // GLM-5.2
+	"dmodel":         0.5,  // DeepSeek-V4-Pro
+	"dfmodel":        0.1,  // DeepSeek-V4-Flash
+	"mmodel":         0.2,  // MiniMax-M3
 }
+
+// Context window options from Qoder docs.
+// Source: https://docs.qoder.com/user-guide/chat/model-tier-selector
+// 200K=standard, 400K=extended, 1M=extreme
+var contextWindowOptions = []int{200000, 400000, 1000000}
+
+// Thinking effort levels from Qoder docs.
+// low: minimal reasoning, fastest
+// medium: balanced
+// high: thorough
+// xhigh: deep analysis
+var thinkingEffortLevels = []string{"low", "medium", "high", "xhigh"}
 
 // estimateCredits returns estimated credits for a request.
 // Heuristic: 1 credit ≈ 1,000 tokens at 1x multiplier.

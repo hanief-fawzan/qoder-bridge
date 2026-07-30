@@ -148,12 +148,14 @@ type ToolFunctionDef struct {
 }
 
 type ChatRequest struct {
-	Model      string        `json:"model"`
-	Messages   []ChatMessage `json:"messages"`
-	Stream     bool          `json:"stream"`
-	MaxTokens  int           `json:"max_tokens,omitempty"`
-	Tools      []ToolDef     `json:"tools,omitempty"`
-	ToolChoice interface{}   `json:"tool_choice,omitempty"`
+	Model          string        `json:"model"`
+	Messages       []ChatMessage `json:"messages"`
+	Stream         bool          `json:"stream"`
+	MaxTokens      int           `json:"max_tokens,omitempty"`
+	Tools          []ToolDef     `json:"tools,omitempty"`
+	ToolChoice     interface{}   `json:"tool_choice,omitempty"`
+	ThinkingEffort string        `json:"thinking_effort,omitempty"` // low, medium, high, xhigh
+	ContextWindow  int           `json:"context_window,omitempty"`  // 200000, 400000, 1000000
 }
 
 type ChatResponse struct {
@@ -333,7 +335,7 @@ func handleStream(w http.ResponseWriter, r *http.Request, req ChatRequest, model
 				Choices: []SSEChoice{{Index: 0, Delta: json.RawMessage(`{"content":` + mustQuote(text) + `}`)}},
 			})
 		}
-	}, req.Tools)
+	}, req.Tools, req.ThinkingEffort, req.ContextWindow)
 
 	if err != nil {
 		log.Printf("stream error: %v", err)
@@ -359,9 +361,9 @@ func handleStream(w http.ResponseWriter, r *http.Request, req ChatRequest, model
 }
 
 func handleNonStream(w http.ResponseWriter, r *http.Request, req ChatRequest, modelKey string) {
-	result, err := runWithPATRotation(r.Context(), patPool, modelKey, req.Messages, req.MaxTokens, nil, req.Tools)
+	result, err := runWithPATRotation(r.Context(), patPool, modelKey, req.Messages, req.MaxTokens, nil, req.Tools, req.ThinkingEffort, req.ContextWindow)
 	if err != nil {
-		sendJSONError(w, 502, err.Error())
+		forwardUpstreamError(w, err)
 		return
 	}
 
@@ -388,7 +390,7 @@ func handleComboNonStream(w http.ResponseWriter, r *http.Request, req ChatReques
 		}
 		log.Printf("combo %q: trying qd/%s", comboName, modelKey)
 
-		result, err := runWithPATRotation(r.Context(), patPool, modelKey, req.Messages, req.MaxTokens, nil, req.Tools)
+		result, err := runWithPATRotation(r.Context(), patPool, modelKey, req.Messages, req.MaxTokens, nil, req.Tools, req.ThinkingEffort, req.ContextWindow)
 		if err == nil {
 			resp := ChatResponse{
 				ID:      "chatcmpl-" + uuidString(),
@@ -405,7 +407,7 @@ func handleComboNonStream(w http.ResponseWriter, r *http.Request, req ChatReques
 		lastErr = err
 		log.Printf("combo %q: qd/%s failed: %v", comboName, modelKey, err)
 	}
-	sendJSONError(w, 502, fmt.Sprintf("combo %s: all models failed, last error: %s", comboName, lastErr))
+	forwardUpstreamError(w, fmt.Errorf("combo %s: all models failed, last: %w", comboName, lastErr))
 }
 
 func handleComboStream(w http.ResponseWriter, r *http.Request, req ChatRequest, comboName string, modelList []string) {
@@ -442,7 +444,7 @@ func handleComboStream(w http.ResponseWriter, r *http.Request, req ChatRequest, 
 					Choices: []SSEChoice{{Index: 0, Delta: json.RawMessage(`{"content":` + mustQuote(text) + `}`)}},
 				})
 			}
-		}, req.Tools)
+		}, req.Tools, req.ThinkingEffort, req.ContextWindow)
 
 		if err == nil {
 			_ = result
@@ -498,7 +500,7 @@ func handleQuota(w http.ResponseWriter, r *http.Request) {
 
 // ── PAT rotation ────────────────────────────────────────────────────────────
 
-func runWithPATRotation(ctx context.Context, pool *PATPool, modelKey string, messages []ChatMessage, maxTokens int, onChunk StreamCallback, tools []ToolDef) (string, error) {
+func runWithPATRotation(ctx context.Context, pool *PATPool, modelKey string, messages []ChatMessage, maxTokens int, onChunk StreamCallback, tools []ToolDef, thinkingEffort string, contextWindow int) (string, error) {
 	start := time.Now()
 
 	// Smart anti-ban delay: random jitter between 0 and requestDelay ms
@@ -511,13 +513,13 @@ func runWithPATRotation(ctx context.Context, pool *PATPool, modelKey string, mes
 
 	pat := pool.Next()
 
-	result, err := callQoder(ctx, pat, modelKey, messages, maxTokens, onChunk, tools)
+	result, err := callQoder(ctx, pat, modelKey, messages, maxTokens, onChunk, tools, thinkingEffort, contextWindow)
 	if err != nil {
 		log.Printf("qd %s error: %v (pat: %s)", modelKey, err, maskPAT(pat))
 		if isAuthError(err) && pool.Len() > 1 {
 			pat2 := pool.Next()
 			log.Printf("pat rotation: %s -> %s", maskPAT(pat), maskPAT(pat2))
-			result, err = callQoder(ctx, pat2, modelKey, messages, maxTokens, onChunk, tools)
+			result, err = callQoder(ctx, pat2, modelKey, messages, maxTokens, onChunk, tools, thinkingEffort, contextWindow)
 			if err == nil {
 				pat = pat2
 			}
@@ -572,9 +574,20 @@ func runWithPATRotation(ctx context.Context, pool *PATPool, modelKey string, mes
 }
 
 func isAuthError(err error) bool {
+	if ue, ok := err.(*UpstreamError); ok {
+		return ue.StatusCode == 401 || ue.StatusCode == 403
+	}
 	s := err.Error()
 	return strings.Contains(s, "401") || strings.Contains(s, "403") ||
 		strings.Contains(s, "expired") || strings.Contains(s, "unauthorized")
+}
+
+// isQueueError returns true if the error is a Qoder queue/rate-limit error (403 with isQueued=true).
+func isQueueError(err error) bool {
+	if ue, ok := err.(*UpstreamError); ok {
+		return ue.StatusCode == 403 && strings.Contains(ue.Body, "isQueued")
+	}
+	return false
 }
 
 // ── Model & combo resolution ────────────────────────────────────────────────
@@ -648,6 +661,24 @@ func sendJSONError(w http.ResponseWriter, code int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	json.NewEncoder(w).Encode(map[string]interface{}{"error": map[string]string{"message": msg}})
+}
+
+// forwardUpstreamError forwards the raw Qoder API error to the client,
+// preserving the upstream status code and body for debugging.
+func forwardUpstreamError(w http.ResponseWriter, err error) {
+	if ue, ok := err.(*UpstreamError); ok {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(ue.StatusCode)
+		// Try to forward as structured JSON if possible
+		var parsed map[string]interface{}
+		if json.Unmarshal([]byte(ue.Body), &parsed) == nil {
+			json.NewEncoder(w).Encode(parsed)
+		} else {
+			json.NewEncoder(w).Encode(map[string]interface{}{"error": map[string]string{"message": ue.Body}})
+		}
+		return
+	}
+	sendJSONError(w, 502, err.Error())
 }
 
 // ── .env loader ─────────────────────────────────────────────────────────────

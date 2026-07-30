@@ -32,6 +32,16 @@ const (
 
 // ── Credential cache ────────────────────────────────────────────────────────
 
+// UpstreamError carries the raw Qoder API error for forwarding to clients.
+type UpstreamError struct {
+	StatusCode int
+	Body       string
+}
+
+func (e *UpstreamError) Error() string {
+	return fmt.Sprintf("qoder %d: %s", e.StatusCode, e.Body)
+}
+
 type patCredential struct {
 	pat         string // original PAT (pt-...)
 	accessToken string // job token (jt-...)
@@ -471,7 +481,7 @@ func truncate(s string, n int) string {
 }
 
 // buildQoderRequestBody creates the exact JSON payload Qoder expects.
-func buildQoderRequestBody(modelKey string, messages []ChatMessage, maxTokens int, creds *patCredential, tools []ToolDef) ([]byte, error) {
+func buildQoderRequestBody(modelKey string, messages []ChatMessage, maxTokens int, creds *patCredential, tools []ToolDef, thinkingEffort string, contextWindow int) ([]byte, error) {
 	mc, err := getModelConfig(creds, modelKey)
 	if err != nil {
 		return nil, fmt.Errorf("model config: %w", err)
@@ -510,14 +520,16 @@ func buildQoderRequestBody(modelKey string, messages []ChatMessage, maxTokens in
 		"system":          systemText,
 		"messages":        normalized,
 		"tools":           []interface{}{},
-		"parameters":      map[string]interface{}{"max_tokens": maxTokens},
+		"parameters": map[string]interface{}{"max_tokens": maxTokens},
 		"chat_context": map[string]interface{}{
 			"chatPrompt":  "",
 			"imageUrls":   nil,
 			"extra": map[string]interface{}{
-				"context":      []interface{}{},
-				"modelConfig":  map[string]interface{}{"key": modelKey, "is_reasoning": mc.IsReasoning},
+				"context":         []interface{}{},
+				"modelConfig":     map[string]interface{}{"key": modelKey, "is_reasoning": mc.IsReasoning},
 				"originalContent": lastUser,
+				"thinking_effort": thinkingEffort,
+				"context_window":  contextWindow,
 			},
 			"features": []interface{}{},
 			"text":     lastUser,
@@ -549,7 +561,7 @@ type StreamCallback func(text string)
 
 // callQoder sends a chat completion request directly to Qoder's API with
 // full COSY signing and WAF encoding. No qodercli required.
-func callQoder(ctx context.Context, pat, modelKey string, messages []ChatMessage, maxTokens int, onChunk StreamCallback, tools []ToolDef) (*ChatResult, error) {
+func callQoder(ctx context.Context, pat, modelKey string, messages []ChatMessage, maxTokens int, onChunk StreamCallback, tools []ToolDef, thinkingEffort string, contextWindow int) (*ChatResult, error) {
 	// 1. Resolve credential (PAT → job token + userId)
 	cred, err := getCredential(pat)
 	if err != nil {
@@ -557,7 +569,7 @@ func callQoder(ctx context.Context, pat, modelKey string, messages []ChatMessage
 	}
 
 	// 2. Build request body (Qoder format)
-	payload, err := buildQoderRequestBody(modelKey, messages, maxTokens, cred, tools)
+	payload, err := buildQoderRequestBody(modelKey, messages, maxTokens, cred, tools, thinkingEffort, contextWindow)
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
 	}
@@ -602,7 +614,7 @@ func callQoder(ctx context.Context, pat, modelKey string, messages []ChatMessage
 	if resp.StatusCode != 200 {
 		b, _ := io.ReadAll(resp.Body)
 		credCache.Delete(pat)
-		return nil, fmt.Errorf("qoder %d: %s", resp.StatusCode, string(b))
+		return nil, &UpstreamError{StatusCode: resp.StatusCode, Body: string(b)}
 	}
 
 	// 6. Parse SSE with Qoder envelope unwrapping

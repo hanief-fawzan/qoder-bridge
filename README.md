@@ -160,20 +160,22 @@ Shows: timestamp (WIB + UTC), PAT, model, stream, tokens, credits, status, laten
 
 | Model | Standard | Off-Peak (14:00–00:00 UTC) |
 |-------|:--------:|:--------------------------:|
-| Ultimate | 1.0x | — |
-| Kimi-K3 | 1.0x | — |
-| DeepSeek-V4-Pro | 1.0x | — |
-| Performance | 0.8x | — |
-| Kimi-K2.7-Code | 0.8x | — |
+| Auto (Smart Routing) | 1.0x | — |
+| Ultimate | 1.6x | — |
+| Performance | 1.1x | — |
 | GLM-5.2 | 0.6x | 0.5x |
-| Efficient | 0.5x | — |
+| Kimi-K3 | 1.0x | — |
+| DeepSeek-V4-Pro | 0.5x | — |
 | Qwen3.8-Max-Preview | 0.5x | 0.01x (98% off) |
 | Qwen3.7-Max | 0.5x | 0.1x (80% off) |
-| Qwen3.7-Plus | 0.1x | 0.04x (60% off) |
-| MiniMax-M3 | 0.5x | — |
-| DeepSeek-V4-Flash | 0.3x | — |
-| Lite | 0.1x | — |
+| Kimi-K2.7-Code | 0.3x | — |
+| MiniMax-M3 | 0.2x | — |
+| Efficient | 0.3x | — |
+| Qwen3.7-Plus | 0.1x | — |
+| DeepSeek-V4-Flash | 0.1x | — |
+| Lite | Free | — |
 
+> Source: [Qoder Model Selector docs](https://docs.qoder.com/user-guide/chat/model-tier-selector)
 > Credit ≈ 1,000 tokens at 1x multiplier. Estimates are conservative (standard rates).
 
 ### Database
@@ -194,25 +196,25 @@ Prefix is **case-insensitive** — `QD/Auto`, `qd/AUTO`, `Qd/auto` all work.
 
 | Model ID | Display Name | Description | Credit Multiplier |
 |----------|:------------:|-------------|:-----------------:|
-| `qd/auto` | Auto | Automatic model selection | 1x |
-| `qd/ultimate` | Ultimate | Best quality | 1x |
-| `qd/performance` | Performance | High performance | 0.8x |
-| `qd/efficient` | Efficient | Balanced | 0.5x |
-| `qd/lite` | Lite | Fastest, cheapest | 0.1x |
+| `qd/auto` | Auto | Automatic model selection | 1.0x |
+| `qd/ultimate` | Ultimate | Best quality, deep reasoning | 1.6x |
+| `qd/performance` | Performance | Advanced reasoning | 1.1x |
+| `qd/efficient` | Efficient | Standard reasoning, cost-effective | 0.3x |
+| `qd/lite` | Lite | Fastest, free | Free |
 
 ### 🌐 Frontier Models
 
 | Model ID | Display Name | Type | Credit Multiplier |
 |----------|:------------:|------|:-----------------:|
 | `qd/qmodel_preview` | Qwen3.8-Max-Preview | Reasoning | 0.5x |
-| `qd/qmodel_latest` | Qwen3.7-Max | Reasoning | 0.5x |
-| `qd/qmodel` | Qwen3.7-Plus | General | 0.1x |
+| `qd/qmodel_latest` | Qwen3.7-Max | Reasoning, agentic | 0.5x |
+| `qd/qmodel` | Qwen3.7-Plus | General, multimodal | 0.1x |
 | `qd/kmodel_latest` | Kimi-K3 | Code | 1.0x |
-| `qd/kmodel` | Kimi-K2.7-Code | Code | 0.8x |
-| `qd/gm51model` | GLM-5.2 | General | 0.6x |
-| `qd/dmodel` | DeepSeek-V4-Pro | Reasoning | 1.0x |
-| `qd/dfmodel` | DeepSeek-V4-Flash | Fast | 0.3x |
-| `qd/mmodel` | MiniMax-M3 | General | 0.5x |
+| `qd/kmodel` | Kimi-K2.7-Code | Long-context code | 0.3x |
+| `qd/gm51model` | GLM-5.2 | General, long-horizon | 0.6x |
+| `qd/dmodel` | DeepSeek-V4-Pro | Reasoning, code | 0.5x |
+| `qd/dfmodel` | DeepSeek-V4-Flash | Fast, low-cost | 0.1x |
+| `qd/mmodel` | MiniMax-M3 | Multimodal, 1M context | 0.2x |
 
 > 💡 Display names work everywhere: `"model": "Kimi-K3"` auto-maps to `qd/kmodel_latest`.
 
@@ -239,6 +241,23 @@ curl -N http://127.0.0.1:7100/v1/chat/completions \
     "stream": true
   }'
 ```
+
+### Chat with thinking mode + context window
+
+```bash
+curl -N http://127.0.0.1:7100/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "qd/ultimate",
+    "messages": [{"role": "user", "content": "Design a microservice architecture"}],
+    "stream": true,
+    "thinking_effort": "xhigh",
+    "context_window": 1000000
+  }'
+```
+
+**Thinking Effort**: `low` (fast), `medium` (balanced), `high` (thorough), `xhigh` (deep analysis)
+**Context Window**: `200000` (standard), `400000` (extended), `1000000` (1M — for large projects)
 
 ### Chat with tools (agent support)
 
