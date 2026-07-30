@@ -30,6 +30,19 @@ var proxyLabels []string
 var proxyIdx int
 var proxyMu sync.Mutex
 
+// streamingTransport returns a transport suitable for SSE streaming (no overall timeout).
+func streamingTransport() *http.Transport {
+	return &http.Transport{
+		MaxIdleConns:        100,
+		MaxIdleConnsPerHost: 10,
+		IdleConnTimeout:     90 * time.Second,
+		TLSHandshakeTimeout: 15 * time.Second,
+		ResponseHeaderTimeout: 30 * time.Second,
+		// ponytail: no ReadTimeout here — SSE streams can run indefinitely.
+		// Context cancellation (client disconnect) handles the upper bound.
+	}
+}
+
 // initProxyClient builds the proxy-aware HTTP clients from current env.
 func initProxyClient() {
 	proxyURL := firstNonEmpty(
@@ -41,7 +54,7 @@ func initProxyClient() {
 	)
 
 	if proxyURL == "" {
-		proxyPool = []*http.Client{{Timeout: 5 * time.Minute}}
+		proxyPool = []*http.Client{{Transport: streamingTransport()}}
 		proxyLabels = []string{"direct"}
 		return
 	}
@@ -59,7 +72,7 @@ func initProxyClient() {
 	}
 
 	if len(proxyPool) == 0 {
-		proxyPool = []*http.Client{{Timeout: 5 * time.Minute}}
+		proxyPool = []*http.Client{{Transport: streamingTransport()}}
 		proxyLabels = []string{"direct"}
 	}
 }
@@ -67,7 +80,7 @@ func initProxyClient() {
 // proxyClientFn returns a round-robin proxy client from the pool.
 func proxyClientFn() *http.Client {
 	if len(proxyPool) == 0 {
-		return &http.Client{Timeout: 5 * time.Minute}
+		return &http.Client{Transport: streamingTransport()}
 	}
 	proxyMu.Lock()
 	client := proxyPool[proxyIdx%len(proxyPool)]
@@ -80,7 +93,7 @@ func buildSingleProxyClient(proxyURL string) (*http.Client, string) {
 	u, err := url.Parse(proxyURL)
 	if err != nil {
 		log.Printf("proxy: invalid URL %q: %v — using direct", proxyURL, err)
-		return &http.Client{Timeout: 5 * time.Minute}, "direct"
+		return &http.Client{Transport: streamingTransport()}, "direct"
 	}
 
 	switch u.Scheme {
@@ -90,7 +103,7 @@ func buildSingleProxyClient(proxyURL string) (*http.Client, string) {
 		return buildHTTPProxyClient(u)
 	default:
 		log.Printf("proxy: unsupported scheme %q — using direct", u.Scheme)
-		return &http.Client{Timeout: 5 * time.Minute}, "direct"
+		return &http.Client{Transport: streamingTransport()}, "direct"
 	}
 }
 
@@ -114,7 +127,7 @@ func buildSocks5Client(u *url.URL) (*http.Client, string) {
 	dialer, err := proxy.SOCKS5("tcp", host, auth, proxy.Direct)
 	if err != nil {
 		log.Printf("proxy: socks5 dialer error: %v — using direct", err)
-		return &http.Client{Timeout: 5 * time.Minute}, "direct"
+		return &http.Client{Transport: streamingTransport()}, "direct"
 	}
 
 	label := fmt.Sprintf("socks5://%s", host)
@@ -122,17 +135,14 @@ func buildSocks5Client(u *url.URL) (*http.Client, string) {
 		label = fmt.Sprintf("socks5://%s:***@%s", u.User.Username(), host)
 	}
 
-	return &http.Client{
-		Transport: &http.Transport{
-			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-				if cd, ok := dialer.(contextDialer); ok {
-					return cd.DialContext(ctx, network, addr)
-				}
-				return dialer.Dial(network, addr)
-			},
-		},
-		Timeout: 5 * time.Minute,
-	}, label
+	t := streamingTransport()
+	t.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		if cd, ok := dialer.(contextDialer); ok {
+			return cd.DialContext(ctx, network, addr)
+		}
+		return dialer.Dial(network, addr)
+	}
+	return &http.Client{Transport: t}, label
 }
 
 func buildHTTPProxyClient(u *url.URL) (*http.Client, string) {
@@ -140,12 +150,9 @@ func buildHTTPProxyClient(u *url.URL) (*http.Client, string) {
 	if u.User != nil {
 		label = fmt.Sprintf("%s://%s:***@%s", u.Scheme, u.User.Username(), u.Host)
 	}
-	return &http.Client{
-		Transport: &http.Transport{
-			Proxy: http.ProxyURL(u),
-		},
-		Timeout: 5 * time.Minute,
-	}, label
+	t := streamingTransport()
+	t.Proxy = http.ProxyURL(u)
+	return &http.Client{Transport: t}, label
 }
 
 func firstNonEmpty(vals ...string) string {
