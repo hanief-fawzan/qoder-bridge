@@ -37,6 +37,7 @@ var (
 	pats     []string
 	patPool  *PATPool
 	combos   map[string][]string // combo name → model list
+	apiKey   string              // optional: sk-* API key for auth
 )
 
 // ── Models ──────────────────────────────────────────────────────────────────
@@ -233,6 +234,15 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
 		http.Error(w, `{"error":{"message":"POST required"}}`, 405)
 		return
+	}
+
+	// Auth check — if apiKey is set, require Bearer token
+	if apiKey != "" {
+		auth := r.Header.Get("Authorization")
+		if auth != "Bearer "+apiKey {
+			http.Error(w, `{"error":{"message":"invalid API key"}}`, 401)
+			return
+		}
 	}
 
 	var req ChatRequest
@@ -555,6 +565,7 @@ type envConfig struct {
 	port     int
 	strategy string
 	combos   map[string][]string
+	apiKey   string // optional: sk-* API key for auth
 }
 
 func loadEnv(envPath string) *envConfig {
@@ -635,6 +646,11 @@ func loadEnv(envPath string) *envConfig {
 				cfg.combos[comboName] = models
 			}
 
+		case key == "QODER_API_KEY":
+			if val != "" {
+				cfg.apiKey = val
+			}
+
 		case key == "QODER_PROXY":
 			if val != "" {
 				os.Setenv("QODER_PROXY", val)
@@ -658,6 +674,7 @@ func runQuotaCLI(envPath string) {
 	}
 
 	patPool = NewPATPool(cfg.pats, cfg.strategy)
+	initProxyClient()
 
 	fmt.Println("Fetching quota for", len(cfg.pats), "PAT(s)...")
 	fmt.Println()
@@ -742,6 +759,9 @@ func main() {
 	if len(cfg.combos) > 0 {
 		combos = cfg.combos
 	}
+	if cfg.apiKey != "" {
+		apiKey = cfg.apiKey
+	}
 
 	// Pre-warm credentials
 	log.Printf("warming %d PAT(s) [strategy: %s]...", len(pats), cfg.strategy)
@@ -797,15 +817,22 @@ func main() {
 
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	log.Printf("")
-	log.Printf("qoder-bridge (cosy-pure-go) listening on %s", addr)
-	log.Printf("  chat:    http://%s/v1/chat/completions", addr)
-	log.Printf("  models:  http://%s/v1/models", addr)
-	log.Printf("  quota:   http://%s/v1/quota", addr)
-	log.Printf("  combos:  http://%s/v1/combos", addr)
-	log.Printf("  health:  http://%s/health", addr)
-	log.Printf("  engine:  pure Go COSY (no qodercli, no Node.js)")
-	log.Printf("  proxy:   %s", getProxyInfo())
+	log.Printf("qoder-bridge (cosy-pure-go)")
+	log.Printf("  ✓ ready on %s", addr)
+	log.Printf("    chat:    http://%s/v1/chat/completions", addr)
+	log.Printf("    models:  http://%s/v1/models", addr)
+	log.Printf("    quota:   http://%s/v1/quota", addr)
+	log.Printf("    combos:  http://%s/v1/combos", addr)
+	log.Printf("    health:  http://%s/health", addr)
+	log.Printf("  ✓ engine:  pure Go COSY (no qodercli)")
+	log.Printf("  ✓ proxy:   %s", getProxyInfo())
+	if apiKey != "" {
+		log.Printf("  ✓ apikey:  enabled (sk-*****)")
+	} else {
+		log.Printf("  ⚠ apikey:  disabled (no QODER_API_KEY in .env)")
+	}
 	log.Printf("")
+	log.Printf("ready to accept connections.")
 
 	if err := http.ListenAndServe(addr, mux); err != nil {
 		log.Fatalf("listen: %v", err)

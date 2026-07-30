@@ -91,6 +91,12 @@ QODER_PORT=7100
 # random: picks a random PAT each request
 PAT_STRATEGY=round-robin
 
+# ── API Key (optional) ───────────────────────────────
+# Protect the bridge with a Bearer token.
+# Use any sk-* key (recommended: 40+ chars).
+# Clients must send: Authorization: Bearer sk-xxx
+#QODER_API_KEY=sk-your-secret-key-here
+
 # ── Combos (optional) ─────────────────────────────────
 # Format: COMBO_<NAME>=model1,model2,model3
 # First model is primary. On error, tries the next.
@@ -436,6 +442,62 @@ go build -o qoder-bridge .
 ```
 
 Requires **Go 1.21+**. Zero external dependencies — pure Go stdlib.
+
+---
+
+## 🔄 Update & Restart
+
+### Update (native)
+
+```bash
+cd ~/projects/qoder-bridge   # wherever you cloned it
+git pull
+go build -o qoder-bridge .
+cp qoder-bridge ~/.local/bin/qoder-bridge
+chmod +x ~/.local/bin/qoder-bridge
+systemctl --user restart qoder-bridge
+```
+
+### Update (Docker)
+
+```bash
+cd ~/projects/qoder-bridge
+git pull
+docker compose build --no-cache
+docker compose up -d
+```
+
+### After changing `.env`
+
+`.env` changes require a **restart** — the bridge reads `.env` only at startup:
+
+```bash
+# Native
+systemctl --user restart qoder-bridge
+
+# Docker
+docker compose restart
+```
+
+### Check status
+
+```bash
+# Native — check logs
+journalctl --user -u qoder-bridge --since "1 min ago" --no-pager
+
+# Docker
+docker compose logs --tail 20
+```
+
+### How to run in foreground (debug)
+
+```bash
+./qoder-bridge                    # blocks terminal — use Ctrl+C to stop
+./qoder-bridge -port 7102         # custom port
+./qoder-bridge -env /path/.env    # custom .env path
+```
+
+> ⚠️ **Do NOT run `./qoder-bridge` directly in production** — use systemd (native) or Docker. Running in foreground blocks your terminal and the process dies when you close it.
 
 ---
 
