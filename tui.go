@@ -575,26 +575,50 @@ func tuiRunUpdate() string {
 
 	sb.WriteString(fmt.Sprintf("Updating from %s...\n", projDir))
 
-	// git pull
-	if err := runCmd(projDir, "git", "pull"); err != nil {
-		sb.WriteString(fmt.Sprintf("git pull FAILED: %v\n", err))
+	// git pull — use CombinedOutput (not runCmd, which sends to raw terminal)
+	out, err := exec.Command("git", "pull").Output()
+	if err != nil {
+		sb.WriteString(fmt.Sprintf("git pull FAILED: %v\n%s\n", err, string(out)))
 		return sb.String()
 	}
 	sb.WriteString("git pull... ok\n")
 
 	// go build
-	if err := runCmd(projDir, "go", "build", "-o", "qoder-bridge", "."); err != nil {
-		sb.WriteString(fmt.Sprintf("build FAILED: %v\n", err))
+	out, err = exec.Command("go", "build", "-o", "qoder-bridge", ".").CombinedOutput()
+	if err != nil {
+		sb.WriteString(fmt.Sprintf("build FAILED: %v\n%s\n", err, string(out)))
 		return sb.String()
 	}
 	sb.WriteString("build... ok\n")
 
-	// Copy binary to ~/.local/bin
+	// Stop running daemon BEFORE copying (binary in use on Linux can be replaced,
+	// but stop first so restart picks up new binary)
+	sb.WriteString("stopping daemon...\n")
+	stopOut, _ := exec.Command(bridgeExe(), "stop").CombinedOutput()
+	sb.WriteString(fmt.Sprintf("%s\n", strings.TrimSpace(string(stopOut))))
+	time.Sleep(500 * time.Millisecond)
+
+	// Copy binary — find actual install location
+	dest := ""
+	candidates := []string{
+		filepath.Join(os.Getenv("HOME"), ".local", "bin", "qoder-bridge"),
+		filepath.Join("/usr", "local", "bin", "qoder-bridge"),
+	}
+	for _, c := range candidates {
+		if _, err := os.Stat(c); err == nil {
+			dest = c
+			break
+		}
+	}
+	if dest == "" {
+		dest = filepath.Join(os.Getenv("HOME"), ".local", "bin", "qoder-bridge")
+		os.MkdirAll(filepath.Dir(dest), 0755)
+	}
+
 	exe := filepath.Join(projDir, "qoder-bridge")
-	dest := filepath.Join(os.Getenv("HOME"), ".local", "bin", "qoder-bridge")
-	os.MkdirAll(filepath.Dir(dest), 0755)
-	if err := runCmd(projDir, "cp", exe, dest); err != nil {
-		sb.WriteString(fmt.Sprintf("install FAILED: %v\n", err))
+	cpOut, err := exec.Command("cp", exe, dest).CombinedOutput()
+	if err != nil {
+		sb.WriteString(fmt.Sprintf("install FAILED: %v\n%s\n", err, string(cpOut)))
 		return sb.String()
 	}
 	sb.WriteString(fmt.Sprintf("installed to %s\n", dest))

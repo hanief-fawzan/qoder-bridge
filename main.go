@@ -659,6 +659,7 @@ func resolveCombo(model string) ([]string, bool) {
 
 	m = strings.TrimPrefix(m, "combo-")
 	m = strings.TrimPrefix(m, "combo_")
+	m = strings.ReplaceAll(m, "_", "-")
 
 	if models, ok := combos[m]; ok {
 		return models, true
@@ -836,6 +837,7 @@ func loadEnv(envPath string) *envConfig {
 
 		case strings.HasPrefix(key, "COMBO_"):
 			comboName := strings.ToLower(strings.TrimPrefix(key, "COMBO_"))
+			comboName = strings.ReplaceAll(comboName, "_", "-")
 			var models []string
 			for _, m := range strings.Split(val, ",") {
 				m = strings.TrimSpace(m)
