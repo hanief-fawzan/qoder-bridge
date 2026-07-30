@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"github.com/gdamore/tcell/v2"
@@ -556,27 +557,49 @@ func updateView() tview.Primitive {
 func tuiRunUpdate() string {
 	var sb strings.Builder
 
+	// Find project directory (same logic as runUpdate CLI)
+	projDir := ""
+	for _, d := range []string{
+		filepath.Join(os.Getenv("HOME"), "projects", "qoder-bridge"),
+		".",
+	} {
+		if _, err := os.Stat(filepath.Join(d, ".git")); err == nil {
+			projDir = d
+			break
+		}
+	}
+	if projDir == "" {
+		return "Error: cannot find qoder-bridge git repo.\nClone to ~/projects/qoder-bridge or run from the project directory."
+	}
+
+	sb.WriteString(fmt.Sprintf("Updating from %s...\n", projDir))
+
 	// git pull
-	cmd := exec.Command("git", "pull", "--ff-only")
-	cmd.Dir = bridgeDir()
-	out, err := cmd.CombinedOutput()
-	sb.WriteString(fmt.Sprintf("$ git pull\n%s\n", string(out)))
-	if err != nil {
-		sb.WriteString(fmt.Sprintf("Error: %v\n", err))
+	if err := runCmd(projDir, "git", "pull"); err != nil {
+		sb.WriteString(fmt.Sprintf("git pull FAILED: %v\n", err))
 		return sb.String()
 	}
+	sb.WriteString("git pull... ok\n")
 
 	// go build
-	cmd = exec.Command("go", "build", "-o", "qoder-bridge", ".")
-	cmd.Dir = bridgeDir()
-	out, err = cmd.CombinedOutput()
-	sb.WriteString(fmt.Sprintf("$ go build\n%s\n", string(out)))
-	if err != nil {
-		sb.WriteString(fmt.Sprintf("Build error: %v\n", err))
+	if err := runCmd(projDir, "go", "build", "-o", "qoder-bridge", "."); err != nil {
+		sb.WriteString(fmt.Sprintf("build FAILED: %v\n", err))
 		return sb.String()
 	}
+	sb.WriteString("build... ok\n")
 
-	sb.WriteString("✅ Build successful! Restarting bridge...\n")
+	// Copy binary to ~/.local/bin
+	exe := filepath.Join(projDir, "qoder-bridge")
+	dest := filepath.Join(os.Getenv("HOME"), ".local", "bin", "qoder-bridge")
+	os.MkdirAll(filepath.Dir(dest), 0755)
+	if err := runCmd(projDir, "cp", exe, dest); err != nil {
+		sb.WriteString(fmt.Sprintf("install FAILED: %v\n", err))
+		return sb.String()
+	}
+	sb.WriteString(fmt.Sprintf("installed to %s\n", dest))
+
+	// Restart
+	sb.WriteString("restarting...\n")
 	sb.WriteString(tuiDoRestart())
 	return sb.String()
 }
