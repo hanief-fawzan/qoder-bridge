@@ -635,6 +635,11 @@ func loadEnv(envPath string) *envConfig {
 				cfg.combos[comboName] = models
 			}
 
+		case key == "QODER_PROXY":
+			if val != "" {
+				os.Setenv("QODER_PROXY", val)
+			}
+
 		case strings.HasPrefix(line, "pt-"):
 			cfg.pats = append(cfg.pats, line)
 		}
@@ -695,6 +700,9 @@ func main() {
 	flag.Parse()
 
 	cfg := loadEnv(*envFlag)
+
+	// Initialize proxy-aware HTTP client after .env is loaded
+	initProxyClient()
 
 	// Override port from flag
 	if *portFlag > 0 {
@@ -796,6 +804,7 @@ func main() {
 	log.Printf("  combos:  http://%s/v1/combos", addr)
 	log.Printf("  health:  http://%s/health", addr)
 	log.Printf("  engine:  pure Go COSY (no qodercli, no Node.js)")
+	log.Printf("  proxy:   %s", getProxyInfo())
 	log.Printf("")
 
 	if err := http.ListenAndServe(addr, mux); err != nil {

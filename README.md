@@ -99,6 +99,12 @@ COMBO_FAST=efficient,lite
 COMBO_SMART=ultimate,qmodel_preview,dmodel
 COMBO_CHEAP=lite,efficient,dfmodel
 COMBO_DEFAULT=auto,ultimate,performance
+
+# ── Proxy (optional) ─────────────────────────────────
+# Route all Qoder API traffic through a proxy.
+# Supports: socks5://, socks5h://, http://, https://
+# Priority: QODER_PROXY > HTTPS_PROXY > ALL_PROXY
+#QODER_PROXY=socks5://admin:pass@127.0.0.1:1080
 ```
 
 ### 🏁 CLI flags
@@ -346,6 +352,65 @@ providers:
       - qd/combo-fast
       - qd/combo-smart
       - qd/combo-cheap
+```
+
+---
+
+## 🌐 Proxy Support
+
+Route all Qoder API traffic through a SOCKS5 or HTTP proxy. Useful for:
+
+- **WARP proxy** — route through Cloudflare WARP for clean egress IPs
+- **Privacy** — hide your VPS real IP from Qoder
+- **Bypass restrictions** — if your VPS IP is blocked
+
+### 🔧 Configure
+
+Add to `.env`:
+
+```env
+# SOCKS5 proxy (e.g., MicroWARP)
+QODER_PROXY=socks5://admin:pass@127.0.0.1:1080
+
+# HTTP proxy
+QODER_PROXY=http://127.0.0.1:8080
+
+# SOCKS5 without auth
+QODER_PROXY=socks5://127.0.0.1:1080
+
+# SOCKS5h (DNS resolved by proxy)
+QODER_PROXY=socks5h://admin:pass@127.0.0.1:1080
+```
+
+### 📋 Supported formats
+
+| Format | Example | Description |
+|--------|---------|-------------|
+| `socks5://` | `socks5://user:pass@host:1080` | SOCKS5 with auth |
+| `socks5h://` | `socks5h://host:1080` | SOCKS5, DNS resolved by proxy |
+| `http://` | `http://host:8080` | HTTP CONNECT proxy |
+| `https://` | `https://host:8080` | HTTPS CONNECT proxy |
+
+### 🔍 Env priority
+
+1. `QODER_PROXY` (highest — dedicated to qoder-bridge)
+2. `HTTPS_PROXY` / `https_proxy`
+3. `ALL_PROXY` / `all_proxy`
+
+### 🚀 Quick: MicroWARP + qoder-bridge
+
+```bash
+# 1. Start MicroWARP (SOCKS5 proxy via Cloudflare WARP)
+cd ~/microwarp && docker compose up -d
+
+# 2. Add to qoder-bridge .env
+echo 'QODER_PROXY=socks5://admin:pass@127.0.0.1:1080' >> ~/projects/qoder-bridge/.env
+
+# 3. Restart qoder-bridge
+systemctl --user restart qoder-bridge
+
+# 4. Verify — startup log shows proxy info
+journalctl --user -u qoder-bridge --since "5 sec ago" | grep proxy
 ```
 
 ---

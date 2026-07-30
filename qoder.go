@@ -89,7 +89,9 @@ func exchangeJobToken(pat string) (string, time.Time, error) {
 	req.Header.Set("Cosy-Version", cosyVersion)
 	req.Header.Set("Cosy-ClientType", clientType)
 
-	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+	ctx, cancel := context.WithTimeout(req.Context(), 15*time.Second)
+	defer cancel()
+	resp, err := proxyClient.Do(req.WithContext(ctx))
 	if err != nil {
 		return "", time.Time{}, err
 	}
@@ -131,7 +133,9 @@ func fetchUserID(jobToken string) (string, error) {
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", "qodercli/1.0.0")
 
-	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	ctx, cancel := context.WithTimeout(req.Context(), 10*time.Second)
+	defer cancel()
+	resp, err := proxyClient.Do(req.WithContext(ctx))
 	if err != nil {
 		return "", err
 	}
@@ -204,7 +208,9 @@ func fetchModelConfig(cred *patCredential, modelKey string, retry bool) (*modelC
 	}
 	req.Header.Set("Accept-Encoding", "identity")
 
-	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+	ctx, cancel := context.WithTimeout(req.Context(), 15*time.Second)
+	defer cancel()
+	resp, err := proxyClient.Do(req.WithContext(ctx))
 	if err != nil {
 		return nil, err
 	}
@@ -305,7 +311,9 @@ func fetchQuota(pat string) QuotaInfo {
 	req.Header.Set("Authorization", "Bearer "+cred.accessToken)
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	ctx, cancel := context.WithTimeout(req.Context(), 10*time.Second)
+	defer cancel()
+	resp, err := proxyClient.Do(req.WithContext(ctx))
 	if err != nil {
 		return QuotaInfo{PAT: maskPAT(pat), Error: err.Error()}
 	}
@@ -544,7 +552,7 @@ func callQoder(ctx context.Context, pat, modelKey string, messages []ChatMessage
 		req.Header.Set(k, v)
 	}
 
-	resp, err := (&http.Client{Timeout: 5 * time.Minute}).Do(req)
+	resp, err := proxyClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("request: %w", err)
 	}
