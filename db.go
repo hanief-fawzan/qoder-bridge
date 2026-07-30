@@ -179,6 +179,46 @@ func queryUsage(fromTS, toTS int64) ([]UsageRow, error) {
 	return out, nil
 }
 
+// ── Log queries ───────────────────────────────────────────────────────────
+
+type LogRow struct {
+	TS              int64
+	PAT             string
+	Model           string
+	Stream          int
+	TotalTokens     int
+	Credits         float64
+	Status          int
+	Error           string
+	LatencyMs       int
+}
+
+func queryLogs(fromTS, toTS int64) ([]LogRow, error) {
+	if db == nil {
+		return nil, fmt.Errorf("db not initialized")
+	}
+	rows, err := db.Query(`
+		SELECT ts, pat, model, stream, total_tokens, credits, status, error, latency_ms
+		FROM request_logs
+		WHERE ts >= ? AND ts <= ?
+		ORDER BY ts DESC
+		LIMIT 200`, fromTS, toTS)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []LogRow
+	for rows.Next() {
+		var r LogRow
+		if err := rows.Scan(&r.TS, &r.PAT, &r.Model, &r.Stream, &r.TotalTokens, &r.Credits, &r.Status, &r.Error, &r.LatencyMs); err != nil {
+			continue
+		}
+		out = append(out, r)
+	}
+	return out, nil
+}
+
 // ── DB size guard ───────────────────────────────────────────────────────────
 
 func dbSizeBytes() int64 {

@@ -22,7 +22,7 @@ func runConfigCLI(args []string) {
 	}
 
 	if len(args) == 0 {
-		configShow()
+		runConfigTUI()
 		return
 	}
 
