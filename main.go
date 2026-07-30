@@ -92,13 +92,34 @@ type PATPool struct {
 	pats     []string
 	idx      int
 	strategy string // "round-robin" or "random"
+	// cooldown tracks PATs that should be skipped until a deadline.
+	// Key: PAT string, Value: time.Time when cooldown expires.
+	cooldown map[string]time.Time
 }
 
 func NewPATPool(pats []string, strategy string) *PATPool {
 	if strategy != "random" {
 		strategy = "round-robin"
 	}
-	return &PATPool{pats: pats, strategy: strategy}
+	return &PATPool{pats: pats, strategy: strategy, cooldown: make(map[string]time.Time)}
+}
+
+// Cooldown marks a PAT as unusable for the given duration.
+func (p *PATPool) Cooldown(pat string, d time.Duration) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.cooldown[pat] = time.Now().Add(d)
+}
+
+// isAvailable returns true if the PAT is not in cooldown.
+func (p *PATPool) isAvailable(pat string) bool {
+	if deadline, ok := p.cooldown[pat]; ok {
+		if time.Now().Before(deadline) {
+			return false
+		}
+		delete(p.cooldown, pat) // expired, clean up
+	}
+	return true
 }
 
 func (p *PATPool) Next() string {
@@ -128,6 +149,7 @@ func (p *PATPool) All() []string {
 }
 
 // NextAvoid selects according to strategy without repeating a PAT in one retry cycle.
+// Skips PATs in cooldown.
 func (p *PATPool) NextAvoid(used map[string]bool) string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -137,7 +159,7 @@ func (p *PATPool) NextAvoid(used map[string]bool) string {
 	if p.strategy == "random" {
 		candidates := make([]int, 0, len(p.pats))
 		for i, pat := range p.pats {
-			if !used[pat] {
+			if !used[pat] && p.isAvailable(pat) {
 				candidates = append(candidates, i)
 			}
 		}
@@ -153,7 +175,7 @@ func (p *PATPool) NextAvoid(used map[string]bool) string {
 	for i := 0; i < len(p.pats); i++ {
 		pat := p.pats[p.idx%len(p.pats)]
 		p.idx++
-		if !used[pat] {
+		if !used[pat] && p.isAvailable(pat) {
 			return pat
 		}
 	}
@@ -648,6 +670,15 @@ func runWithPATRotation(ctx context.Context, pool *PATPool, modelKey string, mes
 			lastErr = fmt.Errorf("empty response from upstream")
 		}
 		log.Printf("qd %s error: %v (pat: %s, attempt %d/%d)", modelKey, lastErr, maskPAT(pat), attempt+1, maxAttempts)
+		// Cooldown PATs with pricing/quota errors (5 minutes)
+		if isPricingError(lastErr) {
+			pool.Cooldown(pat, 5*time.Minute)
+			log.Printf("qd %s: PAT %s in cooldown for 5m (pricing limit)", modelKey, maskPAT(pat))
+		}
+		if isQueueError(lastErr) {
+			pool.Cooldown(pat, 2*time.Minute)
+			log.Printf("qd %s: PAT %s in cooldown for 2m (queue/rate-limit)", modelKey, maskPAT(pat))
+		}
 		// Retrying after streaming bytes would concatenate two generations.
 		// Also stop if error is not retryable (e.g. pricing/quota limit).
 		if emitted || !isRetryableError(lastErr) || ctx.Err() != nil {
@@ -1412,7 +1443,7 @@ func runUpdate(args []string) {
 
 	// go build
 	fmt.Print("  building... ")
-	if err := runCmd(projDir, "go", "build", "-o", "qoder-bridge", "."); err != nil {
+	if err := runCmd(projDir, "go", "build", "-trimpath", "-ldflags=-s -w", "-o", "qoder-bridge", "."); err != nil {
 		fmt.Printf("FAILED: %v\n", err)
 		os.Exit(1)
 	}
