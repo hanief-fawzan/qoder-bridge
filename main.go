@@ -214,6 +214,7 @@ func handleModels(w http.ResponseWriter, r *http.Request) {
 		Created       int64  `json:"created"`
 		OwnedBy       string `json:"owned_by"`
 		ContextLength int    `json:"context_length,omitempty"`
+		Name          string `json:"name,omitempty"`
 	}
 
 	models := []ModelEntry{}
@@ -232,6 +233,7 @@ func handleModels(w http.ResponseWriter, r *http.Request) {
 		models = append(models, ModelEntry{
 			ID: frontierModels[k], Object: "model", Created: 1, OwnedBy: "qoder",
 			ContextLength: modelContextSize(k),
+			Name: k,
 		})
 	}
 
@@ -246,6 +248,7 @@ func handleModels(w http.ResponseWriter, r *http.Request) {
 			models = append(models, ModelEntry{
 				ID: "qd/combo-" + name, Object: "model", Created: 1, OwnedBy: "qoder-combo",
 				ContextLength: 200000,
+				Name: "combo-" + name,
 			})
 		}
 	}
@@ -1289,9 +1292,20 @@ func runUpdate(args []string) {
 		fmt.Println("  stopped (systemd user)... ok")
 	}
 
+	if stopped {
+		time.Sleep(2 * time.Second)
+	}
+
 	fmt.Printf("  installing to %s... ", dest)
-	if err := runCmd(projDir, "cp", exe, dest); err != nil {
+	tmpDest := dest + ".tmp"
+	if err := runCmd(projDir, "cp", exe, tmpDest); err != nil {
+		os.Remove(tmpDest)
 		fmt.Printf("FAILED: %v\n", err)
+		os.Exit(1)
+	}
+	if err := os.Rename(tmpDest, dest); err != nil {
+		os.Remove(tmpDest)
+		fmt.Printf("FAILED (rename): %v\n", err)
 		os.Exit(1)
 	}
 	runCmd(projDir, "chmod", "+x", dest)

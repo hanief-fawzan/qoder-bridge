@@ -23,10 +23,26 @@ echo "  building..."
 cd "$BRIDGE_DIR"
 go build -o qoder-bridge . 2>/dev/null || { echo "FAILED: go build"; exit 1; }
 
-# Copy binary
+# Stop running service first to release binary
+if [ "$(id -u)" -eq 0 ]; then
+    if systemctl is-active --quiet qoder-bridge 2>/dev/null; then
+        echo "  stopping service..."
+        systemctl stop qoder-bridge
+        sleep 2
+    fi
+else
+    if systemctl --user is-active --quiet qoder-bridge 2>/dev/null; then
+        echo "  stopping service..."
+        systemctl --user stop qoder-bridge
+        sleep 2
+    fi
+fi
+
+# Copy binary — atomic rename to avoid "Text file busy"
 echo "  installing binary to $BIN..."
 mkdir -p "$HOME/.local/bin"
-cp qoder-bridge "$BIN"
+cp qoder-bridge "$BIN.tmp"
+mv -f "$BIN.tmp" "$BIN"
 chmod +x "$BIN"
 
 # Create .env if missing
