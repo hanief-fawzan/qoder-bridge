@@ -1191,6 +1191,13 @@ func runStop(args []string) {
 	os.Exit(1)
 }
 
+func runRestart(args []string) {
+	runStop(nil)
+	// Small wait for port release
+	time.Sleep(500 * time.Millisecond)
+	runDaemonize(args)
+}
+
 func runStatus(args []string) {
 	// Try PID file first (daemon mode)
 	if pid, err := readPID(); err == nil && isRunning(pid) {
@@ -1319,8 +1326,10 @@ Usage:
   qoder-bridge                    Start as background daemon
   qoder-bridge run                Run in foreground (for systemd)
   qoder-bridge stop               Stop the daemon
+  qoder-bridge restart            Stop and restart the daemon
   qoder-bridge status             Check if running
   qoder-bridge update             Pull, rebuild, restart
+  qoder-bridge config             Interactive TUI config menu
   qoder-bridge quota              Check PAT quota
   qoder-bridge help               Show this help
 
@@ -1349,6 +1358,8 @@ func main() {
 			runServe(os.Args[2:])
 		case "stop":
 			runStop(os.Args[2:])
+		case "restart":
+			runRestart(os.Args[2:])
 		case "status":
 			runStatus(os.Args[2:])
 		case "update":

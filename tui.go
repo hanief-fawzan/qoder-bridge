@@ -103,6 +103,9 @@ func mainMenu() tview.Primitive {
 		AddItem("  🔄  Update Bridge", "Pull latest, rebuild, restart", 'x', func() {
 			pushPage("sub", updateView())
 		}).
+		AddItem("  🔁  Restart Bridge", "Stop and restart the daemon", 'r', func() {
+			pushPage("sub", restartView())
+		}).
 		AddItem("  🚪  Exit", "Quit (q / Esc)", 'q', func() { app.Stop() })
 
 	list.SetBorder(true)
@@ -573,16 +576,73 @@ func tuiRunUpdate() string {
 		return sb.String()
 	}
 
-	sb.WriteString("✅ Build successful! Restart bridge to apply.\n")
+	sb.WriteString("✅ Build successful! Restarting bridge...\n")
+	sb.WriteString(tuiDoRestart())
+	return sb.String()
+}
+
+func tuiDoRestart() string {
+	var sb strings.Builder
+
+	// Stop
+	exe := bridgeExe()
+	cmd := exec.Command(exe, "stop")
+	out, err := cmd.CombinedOutput()
+	sb.WriteString(fmt.Sprintf("$ %s stop\n%s\n", exe, string(out)))
+	if err != nil {
+		sb.WriteString(fmt.Sprintf("(stop: %v — may not be running)\n", err))
+	}
+
+	// Start
+	cmd = exec.Command(exe)
+	cmd.Dir = bridgeDir()
+	out, err = cmd.CombinedOutput()
+	sb.WriteString(fmt.Sprintf("$ %s\n%s\n", exe, string(out)))
+	if err != nil {
+		sb.WriteString(fmt.Sprintf("Restart error: %v\n", err))
+	} else {
+		sb.WriteString("✅ Bridge restarted!\n")
+	}
 	return sb.String()
 }
 
 func bridgeDir() string {
-	// Try to find bridge dir from executable path
 	if ex, err := os.Executable(); err == nil {
 		return strings.TrimSuffix(ex, "/qoder-bridge")
 	}
 	return "."
+}
+
+func bridgeExe() string {
+	if ex, err := os.Executable(); err == nil {
+		return ex
+	}
+	return "./qoder-bridge"
+}
+
+func restartView() tview.Primitive {
+	text := tview.NewTextView().SetDynamicColors(true)
+	text.SetBorder(true).SetTitle(colorTitle + " Restart Bridge ").SetTitleAlign(tview.AlignCenter)
+	text.SetText(fmt.Sprintf("\n  %sThis will:%s\n\n  %s1. Stop the running bridge daemon%s\n  %s2. Start it again with current .env + DB config%s\n\n  %sPress Enter to restart, Esc to cancel.%s",
+		colorKey, colorReset,
+		colorAccent, colorReset,
+		colorAccent, colorReset,
+		colorDim, colorReset))
+
+	text.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		switch event.Key() {
+		case tcell.KeyEscape:
+			goBack()
+			return nil
+		case tcell.KeyEnter:
+			result := tuiDoRestart()
+			pages.RemovePage("sub")
+			pushPage("sub", updateResult(result))
+			return nil
+		}
+		return event
+	})
+	return text
 }
 
 func updateResult(result string) tview.Primitive {
