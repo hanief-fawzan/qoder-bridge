@@ -7,6 +7,7 @@ package main
 import (
 	"database/sql"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -192,18 +193,30 @@ func enforceDBLimit(maxMB int) {
 	if db == nil {
 		return
 	}
+
+	// 1) Delete logs older than 365 days
+	cutoff365 := time.Now().Add(-365 * 24 * time.Hour).Unix()
+	res, _ := db.Exec(`DELETE FROM request_logs WHERE ts < ?`, cutoff365)
+	if n, _ := res.RowsAffected(); n > 0 {
+		log.Printf("db cleanup: removed %d logs older than 365 days", n)
+	}
+
+	// 2) If DB file still too big, delete oldest 20% of remaining logs
 	maxBytes := int64(maxMB) * 1024 * 1024
-	if dbSizeBytes() < maxBytes {
-		return
+	if dbSizeBytes() >= maxBytes {
+		var oldest int64
+		db.QueryRow(`SELECT ts FROM request_logs ORDER BY ts ASC LIMIT 1`).Scan(&oldest)
+		if oldest > 0 {
+			cutoff := oldest + (time.Now().Unix()-oldest)/5
+			res2, _ := db.Exec(`DELETE FROM request_logs WHERE ts < ?`, cutoff)
+			if n, _ := res2.RowsAffected(); n > 0 {
+				log.Printf("db cleanup: removed %d oldest logs (size limit)", n)
+			}
+		}
 	}
-	// Delete oldest 20% of logs
-	var oldest int64
-	db.QueryRow(`SELECT ts FROM request_logs ORDER BY ts ASC LIMIT 1`).Scan(&oldest)
-	if oldest > 0 {
-		cutoff := oldest + (time.Now().Unix()-oldest)/5
-		db.Exec(`DELETE FROM request_logs WHERE ts < ?`, cutoff)
-		db.Exec(`PRAGMA incremental_vacuum`)
-	}
+
+	// 3) Reclaim space
+	db.Exec(`PRAGMA incremental_vacuum`)
 }
 
 // ── Timezone helpers ────────────────────────────────────────────────────────

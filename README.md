@@ -1,7 +1,7 @@
 # 🌉 qoder-bridge
 
 > **Pure-Go OpenAI-compatible proxy for [Qoder](https://qoder.com) API.**
-> Zero external dependencies (stdlib + SQLite). Zero cold start. Just works.
+> Minimal dependencies (pure-Go SQLite, no CGO). Zero cold start. Just works.
 
 **v1.0.0 Stable** — this is a stable release. Expect minimal updates going forward.
 
@@ -15,7 +15,7 @@ Uses COSY signing (RSA-2048 + AES-128-CBC + MD5) directly — **no qodercli, no 
 |--------|:-------------------:|:---------------------:|
 | 🕐 Cold start | ~9–14s | **~50ms** |
 | 💾 RAM usage | ~300 MB spike | **~8 MB constant** |
-| 📦 Binary size | 200 MB+ (npm) | **~16 MB** |
+| 📦 Binary size | 200 MB+ (npm) | **~11 MB** |
 | 🔗 Dependencies | Node.js + npm | **none** |
 | 📡 Streaming | ✅ | ✅ |
 
@@ -175,6 +175,14 @@ Shows: timestamp (WIB + UTC), PAT, model, stream, tokens, credits, status, laten
 | Lite | 0.1x | — |
 
 > Credit ≈ 1,000 tokens at 1x multiplier. Estimates are conservative (standard rates).
+
+### Database
+
+- **Location**: `~/.qoder-bridge/data.db` (SQLite, pure Go, no CGO)
+- **Auto-cleanup**: Logs older than 365 days are automatically deleted every hour
+- **Size cap**: If DB exceeds ~100MB, oldest 20% of logs are pruned
+- **Config table** (`api_key`, `proxy`, `domain`, `delay`) is **never** cleaned up — only `request_logs` are affected by cleanup
+- **Runs without DB**: If SQLite fails to init, bridge still works (just no logging/config)
 
 ---
 
