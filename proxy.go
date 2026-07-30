@@ -9,12 +9,12 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"math/rand"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/net/proxy"
@@ -25,6 +25,10 @@ var proxyPool []*http.Client
 
 // proxyLabels holds human-readable descriptions for logging.
 var proxyLabels []string
+
+// proxyIdx is the round-robin counter for proxy rotation.
+var proxyIdx int
+var proxyMu sync.Mutex
 
 // initProxyClient builds the proxy-aware HTTP clients from current env.
 func initProxyClient() {
@@ -60,12 +64,16 @@ func initProxyClient() {
 	}
 }
 
-// proxyClient returns a random proxy client from the pool.
+// proxyClientFn returns a round-robin proxy client from the pool.
 func proxyClientFn() *http.Client {
 	if len(proxyPool) == 0 {
 		return &http.Client{Timeout: 5 * time.Minute}
 	}
-	return proxyPool[rand.Intn(len(proxyPool))]
+	proxyMu.Lock()
+	client := proxyPool[proxyIdx%len(proxyPool)]
+	proxyIdx++
+	proxyMu.Unlock()
+	return client
 }
 
 func buildSingleProxyClient(proxyURL string) (*http.Client, string) {

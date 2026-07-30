@@ -545,19 +545,27 @@ func runWithPATRotation(ctx context.Context, pool *PATPool, modelKey string, mes
 		}
 	}
 
-	pat := pool.Next()
+	// Try up to pool.Len() PATs on auth/queue errors (full rotation)
+	maxAttempts := pool.Len()
+	if maxAttempts < 1 {
+		maxAttempts = 1
+	}
 
-	result, err := callQoder(ctx, pat, modelKey, messages, maxTokens, onChunk, tools, thinkingEffort, contextWindow)
-	if err != nil {
-		log.Printf("qd %s error: %v (pat: %s)", modelKey, err, maskPAT(pat))
-		if isAuthError(err) && pool.Len() > 1 {
-			pat2 := pool.Next()
-			log.Printf("pat rotation: %s -> %s", maskPAT(pat), maskPAT(pat2))
-			result, err = callQoder(ctx, pat2, modelKey, messages, maxTokens, onChunk, tools, thinkingEffort, contextWindow)
-			if err == nil {
-				pat = pat2
-			}
+	var result *ChatResult
+	var lastErr error
+	var pat string
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		pat = pool.Next()
+		result, lastErr = callQoder(ctx, pat, modelKey, messages, maxTokens, onChunk, tools, thinkingEffort, contextWindow)
+		if lastErr == nil {
+			break
 		}
+		log.Printf("qd %s error: %v (pat: %s, attempt %d/%d)", modelKey, lastErr, maskPAT(pat), attempt+1, maxAttempts)
+		if (isAuthError(lastErr) || isQueueError(lastErr)) && attempt+1 < maxAttempts {
+			log.Printf("pat rotation: retrying with next PAT...")
+			continue
+		}
+		break // non-retryable error or last attempt
 	}
 
 	// Log to DB
@@ -567,7 +575,7 @@ func runWithPATRotation(ctx context.Context, pool *PATPool, modelKey string, mes
 		promptTokens += estimateTokens(extractText(m.Content))
 	}
 	completionTokens := 0
-	if err == nil && result != nil {
+	if lastErr == nil && result != nil {
 		completionTokens = estimateTokens(result.Text)
 	}
 	totalTokens := promptTokens + completionTokens
@@ -575,16 +583,9 @@ func runWithPATRotation(ctx context.Context, pool *PATPool, modelKey string, mes
 
 	status := 200
 	errMsg := ""
-	if err != nil {
-		status = 500
-		errMsg = err.Error()
-		if strings.Contains(errMsg, "403") {
-			status = 403
-		} else if strings.Contains(errMsg, "401") {
-			status = 401
-		} else if strings.Contains(errMsg, "credit") || strings.Contains(errMsg, "balance") {
-			status = 402
-		}
+	if lastErr != nil {
+		status = upstreamStatusCode(lastErr)
+		errMsg = lastErr.Error()
 	}
 
 	logRequest(LogEntry{
@@ -601,10 +602,18 @@ func runWithPATRotation(ctx context.Context, pool *PATPool, modelKey string, mes
 		ClientIP:         "",
 	})
 
-	if err != nil {
-		return "", err
+	if lastErr != nil {
+		return "", lastErr
 	}
 	return result.Text, nil
+}
+
+// upstreamStatusCode extracts HTTP status from an UpstreamError or guesses from error text.
+func upstreamStatusCode(err error) int {
+	if ue, ok := err.(*UpstreamError); ok {
+		return ue.StatusCode
+	}
+	return 502
 }
 
 func isAuthError(err error) bool {

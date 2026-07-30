@@ -1,10 +1,15 @@
 #!/bin/bash
 # install.sh — Install qoder-bridge as a systemd service
-# Run: bash install.sh
+# Run: bash install.sh           # install + start
+# Run: bash install.sh restart   # rebuild + restart
 set -e
 
 BRIDGE_DIR="$(cd "$(dirname "$0")" && pwd)"
 BIN="$HOME/.local/bin/qoder-bridge"
+RESTART_ONLY=false
+if [ "${1:-}" = "restart" ]; then
+    RESTART_ONLY=true
+fi
 
 echo "Installing qoder-bridge..."
 
@@ -23,20 +28,13 @@ echo "  building..."
 cd "$BRIDGE_DIR"
 go build -o qoder-bridge . 2>/dev/null || { echo "FAILED: go build"; exit 1; }
 
-# Stop running service first to release binary
+# Detect root vs normal user
 if [ "$(id -u)" -eq 0 ]; then
-    if systemctl is-active --quiet qoder-bridge 2>/dev/null; then
-        echo "  stopping service..."
-        systemctl stop qoder-bridge
-        sleep 2
-    fi
+    systemctl stop qoder-bridge 2>/dev/null || true
 else
-    if systemctl --user is-active --quiet qoder-bridge 2>/dev/null; then
-        echo "  stopping service..."
-        systemctl --user stop qoder-bridge
-        sleep 2
-    fi
+    systemctl --user stop qoder-bridge 2>/dev/null || true
 fi
+sleep 2
 
 # Copy binary — atomic rename to avoid "Text file busy"
 echo "  installing binary to $BIN..."
@@ -44,6 +42,30 @@ mkdir -p "$HOME/.local/bin"
 cp qoder-bridge "$BIN.tmp"
 mv -f "$BIN.tmp" "$BIN"
 chmod +x "$BIN"
+
+if [ "$RESTART_ONLY" = true ]; then
+    # Just restart the existing service
+    if [ "$(id -u)" -eq 0 ]; then
+        systemctl restart qoder-bridge
+        if systemctl is-active --quiet qoder-bridge; then
+            echo "✅ qoder-bridge restarted!"
+            echo "  port:    127.0.0.1:$PORT"
+        else
+            echo "❌ qoder-bridge failed to restart. Check: journalctl -u qoder-bridge --since '30 sec ago'"
+            exit 1
+        fi
+    else
+        systemctl --user restart qoder-bridge
+        if systemctl --user is-active --quiet qoder-bridge; then
+            echo "✅ qoder-bridge restarted!"
+            echo "  port:    127.0.0.1:$PORT"
+        else
+            echo "❌ qoder-bridge failed to restart. Check: journalctl --user -u qoder-bridge --since '30 sec ago'"
+            exit 1
+        fi
+    fi
+    exit 0
+fi
 
 # Create .env if missing
 if [ ! -f "$BRIDGE_DIR/.env" ]; then
