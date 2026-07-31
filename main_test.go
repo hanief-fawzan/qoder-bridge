@@ -225,6 +225,62 @@ data: [DONE]
 	}
 }
 
+func TestParseInlineToolCalls(t *testing.T) {
+	// Format 3: [assistant called tool: NAME with arguments: ARGS]
+	input := `Oke, saya mulai.
+
+[assistant called tool: read_file with arguments: {"limit":100,"offset":1,"path":"/home/ideagi/projects/qoder-bridge/qoder.go"}]`
+
+	calls, cleanText := parseToolCallsFromText(input)
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 inline tool call, got %d", len(calls))
+	}
+	if calls[0].Function.Name != "read_file" {
+		t.Errorf("name: got %q, want %q", calls[0].Function.Name, "read_file")
+	}
+	if !strings.Contains(calls[0].Function.Arguments, "qoder.go") {
+		t.Errorf("arguments should contain path, got %q", calls[0].Function.Arguments)
+	}
+	if !strings.Contains(cleanText, "Oke, saya mulai") {
+		t.Errorf("clean text should preserve prefix, got %q", cleanText)
+	}
+	if strings.Contains(cleanText, "[assistant called tool:") {
+		t.Error("clean text should not contain tool call marker")
+	}
+}
+
+func TestParseInlineToolCallsNestedBrackets(t *testing.T) {
+	// Arguments contain arrays with ] — regex must not break
+	input := `[assistant called tool: terminal with arguments: {"command":"echo 'test [1] [2]'","timeout":30}]`
+
+	calls, _ := parseToolCallsFromText(input)
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 call, got %d", len(calls))
+	}
+	if calls[0].Function.Name != "terminal" {
+		t.Errorf("name: got %q", calls[0].Function.Name)
+	}
+	if !strings.Contains(calls[0].Function.Arguments, "[1]") {
+		t.Errorf("arguments should contain [1], got %q", calls[0].Function.Arguments)
+	}
+}
+
+func TestParseInlineToolCallsMultiple(t *testing.T) {
+	input := `[assistant called tool: web_search with arguments: {"query":"test"}]
+[assistant called tool: read_file with arguments: {"path":"/tmp/x.go"}]`
+
+	calls, _ := parseToolCallsFromText(input)
+	if len(calls) != 2 {
+		t.Fatalf("expected 2 inline tool calls, got %d", len(calls))
+	}
+	if calls[0].Function.Name != "web_search" {
+		t.Errorf("call 0 name: got %q", calls[0].Function.Name)
+	}
+	if calls[1].Function.Name != "read_file" {
+		t.Errorf("call 1 name: got %q", calls[1].Function.Name)
+	}
+}
+
 // ── Model resolution tests ──────────────────────────────────────────────
 
 func TestResolveModelKey(t *testing.T) {

@@ -524,12 +524,19 @@ func truncate(s string, n int) string {
 // Regex for ```json ... ``` blocks — compiled once at package level.
 var jsonBlockRe = regexp.MustCompile("(?s)```json\\s*\\n([\\s\\S]*?)\\n```")
 
+// Regex for [assistant called tool: NAME with arguments: ...] text format.
+// Captures the tool name; arguments are extracted separately via balanced
+// bracket counting to handle nested arrays/objects.
+var inlineToolCallRe = regexp.MustCompile(`\[assistant called tool: (\S+) with arguments: `)
+
 // parseToolCallsFromText extracts tool_calls from Qoder text response.
-// Handles two formats:
+// Handles three formats in priority order:
 //  1. ```json\n{"tool_calls": [...]}\n```  (preferred, matching qoder-proxy)
-//  2. Balanced JSON extraction with brace counting (fallback)
-// Returns parsed tool_calls and clean text with tool_call blocks removed.
+//  2. Balanced JSON extraction with brace counting (bare JSON fallback)
+//  3. [assistant called tool: NAME with arguments: ARGS] (inline text format)
+// Returns parsed tool_calls and clean text with tool_call content removed.
 func parseToolCallsFromText(text string) ([]ToolCall, string) {
+	// Format 1: ```json fenced block
 	blockMatch := jsonBlockRe.FindStringSubmatchIndex(text)
 
 	var jsonString string
@@ -542,7 +549,8 @@ func parseToolCallsFromText(text string) ([]ToolCall, string) {
 		// Format 2: balanced brace extraction (fallback for missing fences)
 		extracted := extractBalancedJsonWithToolCalls(text)
 		if extracted == nil {
-			return nil, text
+			// Format 3: try inline [assistant called tool: NAME with arguments: ARGS]
+			return parseInlineToolCalls(text)
 		}
 		jsonString = extracted.json
 		prefixText = extracted.prefix
@@ -551,7 +559,8 @@ func parseToolCallsFromText(text string) ([]ToolCall, string) {
 	// Parse the JSON
 	parsed, err := parseToolCallsJSON(jsonString)
 	if err != nil || len(parsed) == 0 {
-		return nil, text
+		// Format 3: try inline
+		return parseInlineToolCalls(text)
 	}
 
 	// Build tool calls
@@ -583,12 +592,118 @@ func parseToolCallsFromText(text string) ([]ToolCall, string) {
 	}
 
 	if len(calls) == 0 {
-		return nil, text
+		return parseInlineToolCalls(text)
 	}
 
 	// Remove tool_call blocks from text, preserve prefix
 	cleanText := strings.TrimSpace(prefixText)
 	return calls, cleanText
+}
+
+// parseInlineToolCalls extracts [assistant called tool: NAME with arguments: ARGS]
+// patterns from text. Uses balanced bracket counting to handle nested arrays/objects
+// in arguments. This format appears when Qoder models mirror the history serialization
+// format that normalizeMessages injects.
+func parseInlineToolCalls(text string) ([]ToolCall, string) {
+	var calls []ToolCall
+	remaining := text
+
+	for {
+		loc := inlineToolCallRe.FindStringSubmatchIndex(remaining)
+		if loc == nil {
+			break
+		}
+		name := remaining[loc[2]:loc[3]]
+		// Arguments start after "with arguments: "
+		argsStart := loc[1] // end of full match
+
+		// Extract arguments using balanced bracket counting
+		args, argsEnd := extractBalancedArgs(remaining, argsStart)
+		if argsEnd < 0 {
+			// Can't parse args — skip this marker
+			remaining = remaining[loc[0]+1:]
+			continue
+		}
+
+		// Find the closing ]
+		closeIdx := strings.Index(remaining[argsEnd:], "]")
+		if closeIdx < 0 {
+			remaining = remaining[loc[0]+1:]
+			continue
+		}
+		pos := argsEnd + closeIdx // position of ] in remaining
+
+		if args == "" {
+			args = "{}"
+		}
+		calls = append(calls, ToolCall{
+			ID:       generateCallID(),
+			Type:     "function",
+			Function: ToolCallFn{Name: name, Arguments: args},
+		})
+
+		// Remove the matched marker from remaining
+		remaining = remaining[:loc[0]] + remaining[pos+1:]
+	}
+
+	if len(calls) == 0 {
+		return nil, text
+	}
+
+	return calls, strings.TrimSpace(remaining)
+}
+
+// extractBalancedArgs extracts a balanced JSON object/array from text starting at pos.
+// Returns the extracted string and the end position. If the text starts with { or [,
+// uses brace counting; otherwise reads until ] delimiter.
+func extractBalancedArgs(text string, pos int) (string, int) {
+	if pos >= len(text) {
+		return "", -1
+	}
+
+	ch := text[pos]
+	if ch != '{' && ch != '[' {
+		// Not a JSON structure — read plain text until ]
+		end := strings.IndexByte(text[pos:], ']')
+		if end < 0 {
+			return "", -1
+		}
+		return strings.TrimSpace(text[pos : pos+end]), pos + end
+	}
+
+	depth := 0
+	inString := false
+	escapeNext := false
+
+	for i := pos; i < len(text); i++ {
+		c := text[i]
+		if escapeNext {
+			escapeNext = false
+			continue
+		}
+		if c == '\\' && inString {
+			escapeNext = true
+			continue
+		}
+		if c == '"' {
+			inString = !inString
+			continue
+		}
+		if inString {
+			continue
+		}
+		if c == '{' || c == '[' {
+			depth++
+		}
+		if c == '}' || c == ']' {
+			depth--
+			if depth == 0 {
+				return text[pos : i+1], i + 1
+			}
+		}
+	}
+
+	return "", -1
 }
 
 // balancedExtract holds a JSON string and the prefix text before it.
