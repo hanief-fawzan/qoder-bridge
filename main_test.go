@@ -148,7 +148,7 @@ func TestIsRetryableError(t *testing.T) {
 
 func TestUnwrapQoderSSENormalDone(t *testing.T) {
 	input := "data: {\"statusCodeValue\":200,\"body\":\"{\\\"choices\\\":[{\\\"delta\\\":{\\\"content\\\":\\\"Hello\\\"}}]}\"}\n\ndata: {\"statusCodeValue\":200,\"body\":\"{\\\"choices\\\":[{\\\"delta\\\":{\\\"content\\\":\\\" world\\\"}}]}\"}\n\ndata: [DONE]\n"
-	text, err := unwrapQoderSSE(strings.NewReader(input), nil)
+	text, _, err := unwrapQoderSSE(strings.NewReader(input), nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -159,7 +159,7 @@ func TestUnwrapQoderSSENormalDone(t *testing.T) {
 
 func TestUnwrapQoderSSENoDoneWithContent(t *testing.T) {
 	input := "data: {\"statusCodeValue\":200,\"body\":\"{\\\"choices\\\":[{\\\"delta\\\":{\\\"content\\\":\\\"Partial\\\"}}]}\"}\n\n"
-	text, err := unwrapQoderSSE(strings.NewReader(input), nil)
+	text, _, err := unwrapQoderSSE(strings.NewReader(input), nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -170,7 +170,7 @@ func TestUnwrapQoderSSENoDoneWithContent(t *testing.T) {
 
 func TestUnwrapQoderSSENoDoneEmpty(t *testing.T) {
 	input := "data: {\"statusCodeValue\":200,\"body\":\"\"}\n\n"
-	text, err := unwrapQoderSSE(strings.NewReader(input), nil)
+	text, _, err := unwrapQoderSSE(strings.NewReader(input), nil)
 	if err == nil {
 		t.Error("expected error for empty stream without [DONE]")
 	}
@@ -181,16 +181,16 @@ func TestUnwrapQoderSSENoDoneEmpty(t *testing.T) {
 
 func TestUnwrapQoderSSEEnvelopeError(t *testing.T) {
 	input := "data: {\"statusCodeValue\":500,\"body\":\"internal error\"}\n"
-	_, err := unwrapQoderSSE(strings.NewReader(input), nil)
+	_, _, err := unwrapQoderSSE(strings.NewReader(input), nil)
 	if err == nil {
 		t.Error("expected error for 500 envelope")
 	}
 }
 
 func TestUnwrapQoderSSEWithCallback(t *testing.T) {
-	input := "data: {\"statusCodeValue\":200,\"body\":\"{\\\"choices\\\":[{\\\"delta\\\":{\\\"content\\\":\\\"chunk1\\\"}}]}\"}\n\ndata: {\"statusCodeValue\":200,\"body\":\"{\\\"choices\\\":[{\\\"delta\\\":{\\\"content\\\":\\\"chunk2\\\"}}]}\"}\n\ndata: [DONE]\n"
+	input := "data: {\"statusCodeValue\":200,\"body\":\"{\\\"choices\\\":[{\\\"delta\\\":{\\\"content\\\":\\\"chunk1\\\"}}]}\"}\ndata: {\"statusCodeValue\":200,\"body\":\"{\\\"choices\\\":[{\\\"delta\\\":{\\\"content\\\":\\\"chunk2\\\"}}]}\"}\ndata: [DONE]\n"
 	var chunks []string
-	text, err := unwrapQoderSSE(strings.NewReader(input), func(s string) {
+	text, _, err := unwrapQoderSSE(strings.NewReader(input), func(s string) {
 		chunks = append(chunks, s)
 	})
 	if err != nil {
@@ -201,6 +201,27 @@ func TestUnwrapQoderSSEWithCallback(t *testing.T) {
 	}
 	if len(chunks) != 2 {
 		t.Errorf("callback: expected 2 calls, got %d", len(chunks))
+	}
+}
+
+func TestUnwrapQoderSSENativeToolCalls(t *testing.T) {
+	// Simulate Qoder sending native tool_calls in SSE delta
+	input := `data: {"statusCodeValue":200,"body":"{\"choices\":[{\"delta\":{\"content\":\"Let me search.\"}}]}"}
+data: {"statusCodeValue":200,"body":"{\"choices\":[{\"delta\":{\"tool_calls\":[{\"name\":\"web_search\",\"arguments\":{\"query\":\"test\"}}]}}]}"}
+data: [DONE]
+`
+	text, nativeTC, err := unwrapQoderSSE(strings.NewReader(input), nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if text != "Let me search." {
+		t.Errorf("text: got %q", text)
+	}
+	if len(nativeTC) != 1 {
+		t.Fatalf("expected 1 native tool_call, got %d", len(nativeTC))
+	}
+	if name, _ := nativeTC[0]["name"].(string); name != "web_search" {
+		t.Errorf("tool_call name: got %q", name)
 	}
 }
 

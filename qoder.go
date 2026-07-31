@@ -866,20 +866,53 @@ func callQoder(ctx context.Context, pat, modelKey string, messages []ChatMessage
 	}
 
 	// 6. Parse SSE with Qoder envelope unwrapping
-	text, err := unwrapQoderSSE(resp.Body, onChunk)
+	text, nativeToolCalls, err := unwrapQoderSSE(resp.Body, onChunk)
 	if err != nil {
 		return nil, fmt.Errorf("parse SSE: %w", err)
 	}
 
-	// 7. Parse tool_call blocks from text response
-	toolCalls, cleanText := parseToolCallsFromText(text)
+	// 7. Parse tool_call blocks from text response (```json format)
+	textToolCalls, cleanText := parseToolCallsFromText(text)
 
-	return &ChatResult{Text: cleanText, ToolCalls: toolCalls}, nil
+	// 8. Merge: prefer text-parsed (more reliable), fall back to native
+	var allToolCalls []ToolCall
+	if len(textToolCalls) > 0 {
+		allToolCalls = textToolCalls
+	} else if len(nativeToolCalls) > 0 {
+		for _, tc := range nativeToolCalls {
+			name, _ := tc["name"].(string)
+			if name == "" {
+				continue
+			}
+			args := tc["arguments"]
+			var argsJSON string
+			switch a := args.(type) {
+			case string:
+				argsJSON = a
+			case nil:
+				argsJSON = "{}"
+			default:
+				b, _ := json.Marshal(a)
+				argsJSON = string(b)
+			}
+			if argsJSON == "" {
+				argsJSON = "{}"
+			}
+			allToolCalls = append(allToolCalls, ToolCall{
+				ID:       generateCallID(),
+				Type:     "function",
+				Function: ToolCallFn{Name: name, Arguments: argsJSON},
+			})
+		}
+	}
+
+	return &ChatResult{Text: cleanText, ToolCalls: allToolCalls}, nil
 }
 
 // unwrapQoderSSE reads Qoder's SSE stream which wraps responses in a
-// {statusCodeValue, body} envelope and returns the concatenated text.
-func unwrapQoderSSE(body io.Reader, onChunk StreamCallback) (string, error) {
+// {statusCodeValue, body} envelope and returns the concatenated text
+// plus any native tool_calls from the stream delta/message.
+func unwrapQoderSSE(body io.Reader, onChunk StreamCallback) (string, []map[string]interface{}, error) {
 	var full strings.Builder
 	var toolCalls []map[string]interface{} // accumulated tool_calls from stream
 	sawDone := false
@@ -910,7 +943,7 @@ func unwrapQoderSSE(body io.Reader, onChunk StreamCallback) (string, error) {
 		}
 
 		if envelope.StatusCode != 200 && envelope.StatusCode != 0 {
-			return full.String(), fmt.Errorf("qoder stream error %d: %s", envelope.StatusCode, truncate(envelope.Body, 200))
+			return full.String(), nil, fmt.Errorf("qoder stream error %d: %s", envelope.StatusCode, truncate(envelope.Body, 200))
 		}
 
 		inner := envelope.Body
@@ -960,15 +993,15 @@ func unwrapQoderSSE(body io.Reader, onChunk StreamCallback) (string, error) {
 	}
 
 	if err := scanner.Err(); err != nil {
-		return full.String(), err
+		return full.String(), toolCalls, err
 	}
 	if !sawDone {
 		// Some upstream responses end cleanly without a [DONE] sentinel.
 		// If we already collected content, treat it as a successful stream.
-		if full.Len() == 0 {
-			return "", fmt.Errorf("qoder stream ended before [DONE]")
+		if full.Len() == 0 && len(toolCalls) == 0 {
+			return "", nil, fmt.Errorf("qoder stream ended before [DONE]")
 		}
 	}
 
-	return full.String(), nil
+	return full.String(), toolCalls, nil
 }
