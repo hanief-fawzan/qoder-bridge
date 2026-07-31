@@ -391,13 +391,28 @@ func normalizeMessages(messages []ChatMessage, tools []ToolDef) ([]ChatMessage, 
 			continue
 		case "assistant":
 			// Serialize assistant message + any tool_calls for context continuity
+			// Matches qoder-proxy: "[assistant called tool: NAME with arguments: ARGS]"
 			parts := []string{}
 			if text != "" {
 				parts = append(parts, text)
 			}
 			if tcRaw, ok := m.Extra["tool_calls"]; ok {
-				if tcJSON, err := json.Marshal(tcRaw); err == nil {
-					parts = append(parts, fmt.Sprintf("[assistant tool_calls: %s]", string(tcJSON)))
+				if tcArr, ok := tcRaw.([]interface{}); ok {
+					for _, tc := range tcArr {
+						if tcMap, ok := tc.(map[string]interface{}); ok {
+							name := "unknown"
+							args := "{}"
+							if fn, ok := tcMap["function"].(map[string]interface{}); ok {
+								if n, ok := fn["name"].(string); ok {
+									name = n
+								}
+								if a, ok := fn["arguments"].(string); ok {
+									args = a
+								}
+							}
+							parts = append(parts, fmt.Sprintf("[assistant called tool: %s with arguments: %s]", name, args))
+						}
+					}
 				}
 			}
 			if len(parts) > 0 {

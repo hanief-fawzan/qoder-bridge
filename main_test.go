@@ -550,8 +550,11 @@ func TestNormalizeMessagesAssistantWithToolCalls(t *testing.T) {
 		t.Fatal("assistant with tool_calls should produce output")
 	}
 	s, ok := out[0].Content.(string)
-	if !ok || !strings.Contains(s, "assistant tool_calls") {
-		t.Errorf("expected tool_calls serialization, got %v", out[0].Content)
+	if !ok || !strings.Contains(s, "assistant called tool") {
+		t.Errorf("expected 'assistant called tool' serialization, got %v", out[0].Content)
+	}
+	if !strings.Contains(s, "search") {
+		t.Error("should contain tool name")
 	}
 }
 

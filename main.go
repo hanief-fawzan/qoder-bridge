@@ -434,8 +434,14 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.Stream {
+	// When tools are present, use buffered stream: buffer the full response,
+	// parse tool_calls from text, then emit clean SSE chunks.
+	// Streaming raw ```json tool-call blocks to the client would leak them.
+	// Matches qoder-proxy: "with tools → buffered path below."
+	if req.Stream && len(req.Tools) == 0 {
 		handleStream(w, r, req, modelKey)
+	} else if req.Stream {
+		handleBufferedStream(w, r, req, modelKey)
 	} else {
 		handleNonStream(w, r, req, modelKey)
 	}
@@ -500,10 +506,13 @@ func handleStream(w http.ResponseWriter, r *http.Request, req ChatRequest, model
 	}
 
 	if flusher != nil {
-		stop := "stop"
+		finishReason := "stop"
+		if result != nil && len(result.ToolCalls) > 0 {
+			finishReason = "tool_calls"
+		}
 		sendSSE(w, flusher, SSEChunk{
 			ID: id, Object: "chat.completion.chunk", Created: created, Model: req.Model,
-			Choices: []SSEChoice{{Index: 0, Delta: json.RawMessage(`{}`), FinishReason: &stop}},
+			Choices: []SSEChoice{{Index: 0, Delta: json.RawMessage(`{}`), FinishReason: &finishReason}},
 		})
 		fmt.Fprintf(w, "data: [DONE]\n\n")
 		flusher.Flush()
@@ -541,6 +550,110 @@ func handleNonStream(w http.ResponseWriter, r *http.Request, req ChatRequest, mo
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
+}
+
+// handleBufferedStream buffers the full Qoder response, parses tool_calls from text,
+// then emits clean SSE chunks. Used when stream=true but tools are present —
+// the model may emit tool_calls as ```json blocks that must not leak to the client.
+// Matches qoder-proxy's buffered path for tool-call requests.
+func handleBufferedStream(w http.ResponseWriter, r *http.Request, req ChatRequest, modelKey string) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	flusher, _ := w.(http.Flusher)
+	id := "chatcmpl-" + uuidString()
+	created := time.Now().Unix()
+
+	// Buffer: no streaming callback
+	result, err := runWithPATRotation(r.Context(), patPool, modelKey, req.Messages, req.MaxTokens, nil, req.Tools, req.ThinkingEffort, req.ContextWindow)
+
+	if err != nil {
+		log.Printf("buffered stream error: %v", err)
+		errMsg := "[Error: " + err.Error() + "]"
+		if flusher != nil {
+			sendSSE(w, flusher, SSEChunk{
+				ID: id, Object: "chat.completion.chunk", Created: created, Model: req.Model,
+				Choices: []SSEChoice{{Index: 0, Delta: json.RawMessage(`{"role":"assistant","content":""}`)}},
+			})
+			sendSSE(w, flusher, SSEChunk{
+				ID: id, Object: "chat.completion.chunk", Created: created, Model: req.Model,
+				Choices: []SSEChoice{{Index: 0, Delta: json.RawMessage(`{"content":` + mustQuote(errMsg) + `}`)}},
+			})
+			stop := "stop"
+			sendSSE(w, flusher, SSEChunk{
+				ID: id, Object: "chat.completion.chunk", Created: created, Model: req.Model,
+				Choices: []SSEChoice{{Index: 0, Delta: json.RawMessage(`{}`), FinishReason: &stop}},
+			})
+			fmt.Fprintf(w, "data: [DONE]\n\n")
+			flusher.Flush()
+		}
+		return
+	}
+
+	if flusher == nil {
+		return
+	}
+
+	// Send role chunk
+	sendSSE(w, flusher, SSEChunk{
+		ID: id, Object: "chat.completion.chunk", Created: created, Model: req.Model,
+		Choices: []SSEChoice{{Index: 0, Delta: json.RawMessage(`{"role":"assistant","content":""}`)}},
+	})
+
+	text := ""
+	if result != nil {
+		text = result.Text
+	}
+
+	hasToolCalls := result != nil && len(result.ToolCalls) > 0
+
+	if hasToolCalls {
+		// Send prefix text if any
+		if strings.TrimSpace(text) != "" {
+			sendSSE(w, flusher, SSEChunk{
+				ID: id, Object: "chat.completion.chunk", Created: created, Model: req.Model,
+				Choices: []SSEChoice{{Index: 0, Delta: json.RawMessage(`{"content":` + mustQuote(text) + `}`)}},
+			})
+		}
+		// Send each tool_call as a chunk
+		for _, tc := range result.ToolCalls {
+			tcDelta, _ := json.Marshal(map[string]interface{}{
+				"index": 0,
+				"id":    tc.ID,
+				"type":  "function",
+				"function": map[string]interface{}{
+					"name":      tc.Function.Name,
+					"arguments": tc.Function.Arguments,
+				},
+			})
+			sendSSE(w, flusher, SSEChunk{
+				ID: id, Object: "chat.completion.chunk", Created: created, Model: req.Model,
+				Choices: []SSEChoice{{Index: 0, Delta: json.RawMessage(`{"tool_calls":[` + string(tcDelta) + `]}`)}},
+			})
+		}
+		reason := "tool_calls"
+		sendSSE(w, flusher, SSEChunk{
+			ID: id, Object: "chat.completion.chunk", Created: created, Model: req.Model,
+			Choices: []SSEChoice{{Index: 0, Delta: json.RawMessage(`{}`), FinishReason: &reason}},
+		})
+	} else {
+		// Send text content
+		if text != "" {
+			sendSSE(w, flusher, SSEChunk{
+				ID: id, Object: "chat.completion.chunk", Created: created, Model: req.Model,
+				Choices: []SSEChoice{{Index: 0, Delta: json.RawMessage(`{"content":` + mustQuote(text) + `}`)}},
+			})
+		}
+		stop := "stop"
+		sendSSE(w, flusher, SSEChunk{
+			ID: id, Object: "chat.completion.chunk", Created: created, Model: req.Model,
+			Choices: []SSEChoice{{Index: 0, Delta: json.RawMessage(`{}`), FinishReason: &stop}},
+		})
+	}
+
+	fmt.Fprintf(w, "data: [DONE]\n\n")
+	flusher.Flush()
 }
 
 // ── Combo handlers ──────────────────────────────────────────────────────────
