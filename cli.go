@@ -4,12 +4,9 @@
 package main
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"fmt"
 	"os"
 	"sort"
-	"strings"
 	"text/tabwriter"
 )
 
@@ -83,41 +80,36 @@ func configShow() {
 	fmt.Println()
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "KEY\tVALUE")
+	fmt.Fprintln(w, "KEY	VALUE")
 
-	// API key
-	key := cfgGet("api_key")
+	// Auth: global toggle + active key count
 	enabled := cfgBool("api_key_enabled", false)
-	if key == "" {
-		fmt.Fprintln(w, "api_key\t(not set)")
-	} else {
-		masked := key[:4] + strings.Repeat("*", len(key)-4)
-		status := "disabled"
-		if enabled {
-			status = "enabled"
-		}
-		fmt.Fprintf(w, "api_key\t%s (%s)\n", masked, status)
+	status := colorRed + "open access"
+	if enabled {
+		status = colorGreen + "required"
 	}
+	keys, _ := listEnabledAPIKeys()
+	fmt.Fprintf(w, "auth	%s (%d active key(s))%s\n", status, len(keys), colorReset)
 
 	// Delay
 	if v := cfgGet("request_delay_ms"); v != "" {
-		fmt.Fprintf(w, "request_delay_ms\t%s ms\n", v)
+		fmt.Fprintf(w, "request_delay_ms	%s ms\n", v)
 	} else {
-		fmt.Fprintln(w, "request_delay_ms\t(off)")
+		fmt.Fprintln(w, "request_delay_ms	(off)")
 	}
 
 	// Domain
 	if v := cfgGet("domain"); v != "" {
-		fmt.Fprintf(w, "domain\t%s\n", v)
+		fmt.Fprintf(w, "domain	%s\n", v)
 	} else {
-		fmt.Fprintln(w, "domain\t(not set)")
+		fmt.Fprintln(w, "domain	(not set)")
 	}
 
 	// Proxy
 	if v := cfgGet("proxy"); v != "" {
-		fmt.Fprintf(w, "proxy\t%s\n", v)
+		fmt.Fprintf(w, "proxy	%s\n", v)
 	} else {
-		fmt.Fprintln(w, "proxy\t(not set)")
+		fmt.Fprintln(w, "proxy	(not set)")
 	}
 
 	w.Flush()
@@ -130,20 +122,14 @@ func configAPIKey(args []string) {
 	}
 
 	switch args[0] {
-	case "show":
+	case "show", "ls", "list":
 		configAPIKeyShow()
-	case "gen", "generate":
-		configAPIKeyGen()
 	case "on":
-		cfgSet("api_key_enabled", "1")
+		setGlobalAuth(true)
 		fmt.Println("API key auth: enabled")
 	case "off":
-		cfgSet("api_key_enabled", "0")
-		fmt.Println("API key auth: disabled")
-	case "clear":
-		cfgSet("api_key", "")
-		cfgSet("api_key_enabled", "0")
-		fmt.Println("API key removed")
+		setGlobalAuth(false)
+		fmt.Println("API key auth: disabled (open access)")
 	default:
 		fmt.Fprintf(os.Stderr, "unknown apikey command: %s\n", args[0])
 		os.Exit(1)
@@ -151,34 +137,28 @@ func configAPIKey(args []string) {
 }
 
 func configAPIKeyShow() {
-	key := cfgGet("api_key")
-	if key == "" {
-		fmt.Println("No API key configured.")
-		fmt.Println("Generate one with: qoder-bridge config apikey gen")
-		return
+	keys, err := listAPIKeys()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "DB error: %v\n", err)
+		os.Exit(1)
 	}
 	enabled := cfgBool("api_key_enabled", false)
-	status := "disabled"
+	authState := colorRed + "off (open access)"
 	if enabled {
-		status = "enabled"
+		authState = colorGreen + "on (Bearer required)"
 	}
-	fmt.Printf("API key: %s\n", key)
-	fmt.Printf("Status:  %s\n", status)
-	if !enabled {
-		fmt.Println("\nEnable with: qoder-bridge config apikey on")
+	fmt.Printf("Global auth: %s%s\n", authState, colorReset)
+	fmt.Printf("API keys:    %d total\n", len(keys))
+	if len(keys) > 0 {
+		for _, k := range keys {
+			st := colorRed + "disabled"
+			if k.Enabled {
+				st = colorGreen + "enabled"
+			}
+			fmt.Printf("  • [%d] %s — %s%s%s\n", k.ID, k.Name, st, colorReset, "")
+		}
 	}
-}
-
-func configAPIKeyGen() {
-	b := make([]byte, 24)
-	rand.Read(b)
-	key := "sk-" + hex.EncodeToString(b)
-	cfgSet("api_key", key)
-	cfgSet("api_key_enabled", "1")
-	fmt.Printf("Generated new API key: %s\n", key)
-	fmt.Println("Status: enabled")
-	fmt.Println("\nUse in client:")
-	fmt.Printf("  Authorization: Bearer %s\n", key)
+	fmt.Println("\nGenerate a new key via TUI (API Keys → Generate).")
 }
 
 func configDelay(args []string) {

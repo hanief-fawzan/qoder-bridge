@@ -54,6 +54,13 @@ func initDB() error {
 		if err != nil {
 			return
 		}
+		// SQLite via modernc.org/sqlite is internally serialized, but
+		// capping pool prevents runaway goroutines from holding the
+		// driver mutex. One writer at a time is sufficient for our
+		// log/usage throughput.
+		db.SetMaxOpenConns(8)
+		db.SetMaxIdleConns(4)
+		db.SetConnMaxIdleTime(5 * time.Minute)
 		err = migrate(db)
 	})
 	return err
@@ -135,10 +142,6 @@ func cfgSet(key, value string) {
 // Called once on startup — after first run, DB is the source of truth.
 func importEnvFromConfig(cfg *envConfig) {
 	imports := map[string]string{}
-	if cfg.apiKey != "" && cfgGet("api_key") == "" {
-		imports["api_key"] = cfg.apiKey
-		imports["api_key_enabled"] = "1"
-	}
 	if cfg.requestDelay > 0 && cfgGet("request_delay_ms") == "" {
 		imports["request_delay_ms"] = fmt.Sprintf("%d", cfg.requestDelay)
 	}
@@ -387,6 +390,8 @@ func toggleAPIKey(id int, enabled bool) error {
 }
 
 // validateAPIKey checks if a key is valid and enabled. Returns key name.
+// Disabled rows (enabled=0) are treated as nonexistent — invisible to
+// auth — matching the user's "disable = doesn't exist" mental model.
 func validateAPIKey(key string) (string, bool) {
 	if db == nil || key == "" {
 		return "", false
@@ -395,15 +400,12 @@ func validateAPIKey(key string) (string, bool) {
 	var en int
 	err := db.QueryRow(`SELECT name, enabled FROM api_keys WHERE api_key = ?`, key).Scan(&name, &en)
 	if err != nil {
-		// Fallback: check legacy single-key config
-		legacyKey := cfgGet("api_key")
-		legacyEnabled := cfgBool("api_key_enabled", false)
-		if key == legacyKey && legacyEnabled {
-			return "(legacy)", true
-		}
 		return "", false
 	}
-	return name, en == 1
+	if en != 1 {
+		return "", false
+	}
+	return name, true
 }
 
 // ── Log queries ───────────────────────────────────────────────────────────

@@ -312,11 +312,7 @@ func apiKeyMenu() tview.Primitive {
 	list := tview.NewList()
 	list.AddItem("  🔒  Require API Key", fmt.Sprintf("Global auth: %s%s", authStatus, colorReset), 'r', func() {
 		current := cfgBool("api_key_enabled", false)
-		if current {
-			cfgSet("api_key_enabled", "0")
-		} else {
-			cfgSet("api_key_enabled", "1")
-		}
+		setGlobalAuth(!current) // also persists + updates globalEnabled under lock
 		pages.RemovePage("sub")
 		pushPage("sub", apiKeyMenu())
 	})
@@ -335,9 +331,7 @@ func apiKeyMenu() tview.Primitive {
 			// Auto-enable the master toggle so the freshly-issued key is
 			// actually required. Users generating a credential expect the
 			// bridge to start demanding it.
-			if !cfgBool("api_key_enabled", false) {
-				cfgSet("api_key_enabled", "1")
-			}
+			setGlobalAuth(true)
 			showMsg(fmt.Sprintf("%s✅ Generated key [%s]:%s\n%s\n\nGlobal auth toggled ON — this key is now required.\nCopy this key now — it won't be shown again in full.", colorGreen, name, colorReset, newKey), "apikey", apiKeyMenu)
 			pages.RemovePage("sub")
 			pushPage("sub", apiKeyMenu())
@@ -345,27 +339,6 @@ func apiKeyMenu() tview.Primitive {
 	})
 	list.AddItem("  View & Manage Keys", fmt.Sprintf("%d key(s) — Enter to view, toggle, delete", len(keys)), 'v', func() {
 		pushPage("sub", apiKeyTableView())
-	})
-
-	// Legacy single key (backward compat)
-	legacyKey := cfgGet("api_key")
-	legacyMasked := "(not set)"
-	if legacyKey != "" {
-		legacyMasked = legacyKey[:min(8, len(legacyKey))] + "..." + legacyKey[max(0, len(legacyKey)-4):]
-	}
-	list.AddItem("  Set Legacy Key", fmt.Sprintf("Current: %s", legacyMasked), 'k', func() {
-		showInput("Legacy API Key", "sk-...", func(val string) {
-			if val != "" {
-				cfgSet("api_key", val)
-			}
-			pages.RemovePage("sub")
-			pushPage("sub", apiKeyMenu())
-		})
-	})
-	list.AddItem("  Clear Legacy Key", "Remove legacy key entirely", 'x', func() {
-		cfgSet("api_key", "")
-		pages.RemovePage("sub")
-		pushPage("sub", apiKeyMenu())
 	})
 	list.AddItem("  ← Back", "Esc to go back", 'b', func() { goBack() })
 
@@ -642,13 +615,11 @@ func strategyMenu() tview.Primitive {
 // ── Import from .env ──────────────────────────────────────────────────────
 
 func importMenu() tview.Primitive {
-	apiKey := ""
 	delay := ""
 	proxy := ""
 	strategy := ""
 
 	if envData != nil {
-		apiKey = envData.apiKey
 		if envData.requestDelay > 0 {
 			delay = fmt.Sprintf("%d", envData.requestDelay)
 		}
@@ -657,13 +628,8 @@ func importMenu() tview.Primitive {
 	proxy = os.Getenv("QODER_PROXY")
 
 	list := tview.NewList()
-	list.AddItem("  Import ALL from .env", "Migrate all detected values to DB", 'a', func() {
+	list.AddItem("  Import ALL from .env", "Migrate detected .env values to DB", 'a', func() {
 		count := 0
-		if apiKey != "" && cfgGet("api_key") == "" {
-			cfgSet("api_key", apiKey)
-			cfgSet("api_key_enabled", "1")
-			count++
-		}
 		if delay != "" && cfgGet("request_delay_ms") == "" {
 			cfgSet("request_delay_ms", delay)
 			count++
@@ -678,17 +644,6 @@ func importMenu() tview.Primitive {
 		}
 		showMsg(fmt.Sprintf("✅ Imported %d value(s) from .env to DB.\nDB is now source of truth.", count), "import", importMenu)
 	})
-
-	if apiKey != "" {
-		masked := apiKey[:min(8, len(apiKey))] + "..."
-		status := colorDim + "empty"
-		if cfgGet("api_key") != "" {
-			status = colorGreen + "already in DB"
-		}
-		list.AddItem(fmt.Sprintf("  API Key: %s", masked), status, 'k', nil)
-	} else {
-		list.AddItem("  API Key: (not in .env)", "", 'k', nil)
-	}
 
 	if delay != "" {
 		status := colorDim + "empty"

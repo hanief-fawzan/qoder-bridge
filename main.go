@@ -43,7 +43,6 @@ var (
 	pats         []string
 	patPool      *PATPool
 	combos       map[string][]string // combo name -> model list
-	apiKey       string              // optional: sk-* API key for auth
 	requestDelay int                 // max random delay in ms (0 = disabled)
 	startTime    = time.Now()        // server start time for uptime tracking
 )
@@ -113,7 +112,18 @@ func (p *PATPool) Cooldown(pat string, d time.Duration) {
 	p.cooldown[pat] = time.Now().Add(d)
 }
 
-// isAvailable returns true if the PAT is not in cooldown.
+// isAvailablePeek reports cooldown status without mutating the map.
+// Used by /v1/status (read-only path) so a concurrent writer doesn't
+// race with our read lock.
+func (p *PATPool) isAvailablePeek(pat string) bool {
+	if deadline, ok := p.cooldown[pat]; ok {
+		return !time.Now().Before(deadline)
+	}
+	return true
+}
+
+// isAvailable returns true if the PAT is not in cooldown. Caller MUST
+// hold p.mu (write — it may delete expired entries).
 func (p *PATPool) isAvailable(pat string) bool {
 	if deadline, ok := p.cooldown[pat]; ok {
 		if time.Now().Before(deadline) {
@@ -330,10 +340,12 @@ func handleStatus(w http.ResponseWriter, r *http.Request) {
 		db.QueryRow(`SELECT COUNT(*) FROM request_logs`).Scan(&resp.LogCount)
 	}
 
-	// PAT pool status
+	// PAT pool status — read-only snapshot via RLock + isAvailablePeek so
+	// we don't race with concurrent Cooldown() writers (delete on a
+	// read-locked map is a Go race detector fire).
 	patPool.mu.RLock()
 	for _, pat := range pats {
-		info := patInfo{PAT: maskPAT(pat), Available: patPool.isAvailable(pat)}
+		info := patInfo{PAT: maskPAT(pat), Available: patPool.isAvailablePeek(pat)}
 		if deadline, ok := patPool.cooldown[pat]; ok && time.Now().Before(deadline) {
 			info.Cooldown = fmt.Sprintf("%dm remaining", int(time.Until(deadline).Minutes())+1)
 		}
@@ -439,36 +451,43 @@ func handleCombos(w http.ResponseWriter, r *http.Request) {
 
 // ── API key auth model ──────────────────────────────────────────────────
 //
-// Three layers of authentication, evaluated in order:
+// Single source of truth: the api_keys DB table + globalEnabled flag.
 //
-//   1. apiKeyEnv (legacy single key in .env) — if set, hard-coded bypass.
-//      Pre-existing deployments rely on this; removing it would lock users
-//      out of an upgrade. When the env key is set, requests pass without
-//      any DB lookup.
+//   • globalEnabled = true → Bearer required, must match an enabled row.
+//   • globalEnabled = false → open access, no Bearer required.
 //
-//   2. globalEnabled (config: api_key_enabled) — master switch. When OFF,
-//      the bridge is open: no Authorization header is required even if
-//      keys exist in the table. This is the "global toggle" users want
-//      for development / local testing.
+// Disabled rows in the table do NOT count as valid bearers (treat as
+// nonexistent). A row whose enabled column is 0 is invisible to auth.
 //
-//   3. tableKeys (DB: api_keys.enabled=1) — only consulted when
-//      globalEnabled is ON. Bearer must match an *enabled* row.
-//
-// generateKey() automatically flips globalEnabled ON the moment a key is
-// created — users explicitly issuing credentials shouldn't be surprised
-// by an open bridge.
+// generateKey() automatically flips globalEnabled ON so the freshly
+// issued credential is actually demanded.
 var (
-	apiKeyEnv      string // legacy .env api_key
-	globalEnabled  bool   // master switch (api_key_enabled in config)
+	globalEnabled bool   // master switch (api_key_enabled in config)
+	authMu        sync.RWMutex
 )
 
-// apiKeyRequired reports whether the request must carry a valid Bearer.
-// Returns false when global toggle is OFF (open access) even if keys exist.
-func apiKeyRequired() bool {
-	if apiKeyEnv != "" {
-		return true // legacy env key always enforced
-	}
+// authRequired reports whether the next request must carry a valid Bearer.
+// Read-mostly path: RWMutex so /v1/status doesn't block the hot path.
+func authRequired() bool {
+	authMu.RLock()
+	defer authMu.RUnlock()
 	return globalEnabled
+}
+
+// setGlobalAuth flips the master switch and persists to config table.
+// Called from the TUI ("Require API Key" toggle) and from generateKey.
+func setGlobalAuth(on bool) {
+	authMu.Lock()
+	globalEnabled = on
+	authMu.Unlock()
+	cfgSet("api_key_enabled", boolToStr(on))
+}
+
+func boolToStr(b bool) string {
+	if b {
+		return "1"
+	}
+	return "0"
 }
 
 func handleChat(w http.ResponseWriter, r *http.Request) {
@@ -477,46 +496,39 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Auth — layered. Legacy env key bypasses DB; otherwise consult global
-	// toggle + active table keys.
+	// Auth: a single switch decides the entire policy. No DB lookup on
+	// the open path, one query on the closed path.
 	usedAPIKey := "(no key)"
-	switch {
-	case apiKeyEnv != "":
-		// Legacy .env key: hard-coded bearer check.
-		auth := r.Header.Get("Authorization")
-		if auth != "Bearer "+apiKeyEnv {
-			http.Error(w, `{"error":{"message":"invalid API key"}}`, 401)
-			return
-		}
-		usedAPIKey = "(legacy-env)"
-	case globalEnabled:
-		// Master toggle ON — Bearer required, must match an enabled row
-		// (or the legacy config key for backward compat).
+	if authRequired() {
 		auth := r.Header.Get("Authorization")
 		key := strings.TrimPrefix(auth, "Bearer ")
 		if name, ok := validateAPIKey(key); ok {
 			usedAPIKey = name
 		} else {
-			keys, _ := listEnabledAPIKeys()
-			hint := " Authorization header required (Bearer sk-...)."
-			if len(keys) == 0 {
-				hint = " No API keys configured — generate one in TUI (API Keys → Generate New Key) or set the master toggle to OFF for open access."
+			// Tailored hint based on whether keys exist in the table.
+			hint := " Bearer required — provide a valid sk-* key."
+			all, _ := listAPIKeys()
+			if len(all) == 0 {
+				hint = " No API keys configured — generate one via TUI (API Keys → Generate) or set the global toggle to OFF for open access."
+			} else {
+				enabled, _ := listEnabledAPIKeys()
+				if len(enabled) == 0 {
+					hint = " All API keys are disabled — enable one in TUI or set the global toggle to OFF for open access."
+				}
 			}
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(401)
 			fmt.Fprintf(w, `{"error":{"message":"invalid API key.%s"}}`, hint)
 			return
 		}
-	default:
-		// Global toggle OFF — open access, no header required.
-		auth := r.Header.Get("Authorization")
-		key := strings.TrimPrefix(auth, "Bearer ")
-		if key != "" {
+	} else {
+		// Open access — accept any Bearer that's valid (if any) for
+		// usage attribution; never block the request.
+		if auth := r.Header.Get("Authorization"); auth != "" {
+			key := strings.TrimPrefix(auth, "Bearer ")
 			if name, ok := validateAPIKey(key); ok {
 				usedAPIKey = name
 			}
-			// If invalid key sent with toggle off: still allow request
-			// (this is the user's stated intent). Logged for visibility.
 		}
 	}
 
@@ -1426,15 +1438,12 @@ func maskPAT(pat string) string {
 	return "***"
 }
 
-// maskAPIKey returns a safe-to-log representation. The name from the DB
-// is already safe (e.g. "hermes-desktop"); legacy / no-key sentinels
-// pass through verbatim. We never log the raw sk-* secret.
+// maskAPIKey returns a safe-to-log representation of a key name.
+// The DB stores the human-readable label (e.g. "hermes-desktop"),
+// never the raw sk-* secret — so the name IS safe to log verbatim.
 func maskAPIKey(name string) string {
 	if name == "" || name == "(no key)" {
 		return ""
-	}
-	if name == "(legacy)" || name == "(legacy-env)" {
-		return "(legacy)"
 	}
 	return name
 }
@@ -1481,7 +1490,6 @@ type envConfig struct {
 	port         int
 	strategy     string
 	combos       map[string][]string
-	apiKey       string // optional: sk-* API key for auth
 	requestDelay int    // max random delay in ms between requests (0 = disabled)
 	domain       string // optional: public domain for endpoint URLs
 }
@@ -1561,11 +1569,6 @@ func loadEnv(envPath string) *envConfig {
 			}
 			if len(models) > 0 {
 				cfg.combos[comboName] = models
-			}
-
-		case key == "QODER_API_KEY":
-			if val != "" {
-				cfg.apiKey = val
 			}
 
 		case key == "REQUEST_DELAY_MS":
@@ -1701,10 +1704,6 @@ func runServe(args []string) {
 	if len(cfg.combos) > 0 {
 		combos = cfg.combos
 	}
-	if cfg.apiKey != "" {
-		apiKeyEnv = cfg.apiKey
-	}
-	globalEnabled = cfgBool("api_key_enabled", false)
 	if cfg.requestDelay > 0 {
 		requestDelay = cfg.requestDelay
 	}
@@ -1716,9 +1715,7 @@ func runServe(args []string) {
 		// Auto-import .env values to DB on first run
 		importEnvFromConfig(cfg)
 		// DB config overrides .env
-		if v := cfgGet("api_key"); v != "" {
-			apiKey = v
-		}
+		setGlobalAuth(cfgBool("api_key_enabled", false))
 		if v := cfgGet("proxy"); v != "" {
 			os.Setenv("QODER_PROXY", v)
 			initProxyClient()
@@ -1808,13 +1805,12 @@ func runServe(args []string) {
 	log.Printf("  db:      %s", dbLocation())
 	log.Printf("  engine:  pure Go COSY (no qodercli)")
 	log.Printf("  proxy:   %s", getProxyInfo())
-	if apiKey != "" {
-		log.Printf("  apikey:  enabled (sk-*****)")
-	} else {
-		log.Printf("  apikey:  disabled (no QODER_API_KEY in .env)")
-	}
-	log.Printf("")
-	log.Printf("ready to accept connections.")
+	if authRequired() {
+			log.Printf("  auth:    required (Bearer sk-* key)")
+		} else {
+			log.Printf("  auth:    open access (no key required)")
+		}
+		log.Printf("ready to accept connections.")
 
 	// Handle graceful shutdown
 	sigCh := make(chan os.Signal, 1)
