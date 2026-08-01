@@ -301,7 +301,20 @@ func apiKeyMenu() tview.Primitive {
 		keys = []APIKeyEntry{}
 	}
 
+	// Master auth toggle: is API key authentication required?
+	authRequired := cfgBool("api_key_enabled", false) || len(keys) > 0
+	authStatus := colorRed + "disabled — open access"
+	if authRequired {
+		authStatus = colorGreen + "enabled — key required"
+	}
+
 	list := tview.NewList()
+	list.AddItem("  🔒  Require API Key", fmt.Sprintf("Auth: %s%s", authStatus, colorReset), 'r', func() {
+		current := cfgBool("api_key_enabled", false)
+		cfgSet("api_key_enabled", map[bool]string{true: "0", false: "1"}[current])
+		pages.RemovePage("sub")
+		pushPage("sub", apiKeyMenu())
+	})
 	list.AddItem("  Generate New Key", "Create named sk-* key", 'g', func() {
 		showInput("Key name", "hermes-desktop", func(name string) {
 			if name == "" {
@@ -314,46 +327,32 @@ func apiKeyMenu() tview.Primitive {
 				showMsg(fmt.Sprintf("%s❌ Failed:%s\n%v", colorRed, colorReset, err), "apikey", apiKeyMenu)
 				return
 			}
-			showMsg(fmt.Sprintf("%s✅ Generated key [%s]:%s\n%s", colorGreen, name, colorReset, newKey), "apikey", apiKeyMenu)
-			// Rebuild menu for real-time sync
+			showMsg(fmt.Sprintf("%s✅ Generated key [%s]:%s\n%s\n\nCopy this key now — it won't be shown again in full.", colorGreen, name, colorReset, newKey), "apikey", apiKeyMenu)
 			pages.RemovePage("sub")
 			pushPage("sub", apiKeyMenu())
 		})
 	})
-	list.AddItem("  View Keys (table)", fmt.Sprintf("%d key(s) configured", len(keys)), 'v', func() {
+	list.AddItem("  View & Manage Keys", fmt.Sprintf("%d key(s) — Enter to view, toggle, delete", len(keys)), 'v', func() {
 		pushPage("sub", apiKeyTableView())
 	})
 
-	// Legacy single-key controls for backward compatibility
+	// Legacy single key (backward compat)
 	legacyKey := cfgGet("api_key")
-	legacyEnabled := cfgBool("api_key_enabled", false)
-	legacyStatus := colorRed + "disabled"
-	if legacyEnabled {
-		legacyStatus = colorGreen + "enabled"
-	}
 	legacyMasked := "(not set)"
 	if legacyKey != "" {
 		legacyMasked = legacyKey[:min(8, len(legacyKey))] + "..." + legacyKey[max(0, len(legacyKey)-4):]
 	}
-	list.AddItem("  Toggle Legacy Key", fmt.Sprintf("Currently: %s%s", legacyStatus, colorReset), 't', func() {
-		if legacyEnabled {
-			cfgSet("api_key_enabled", "0")
-		} else {
-			cfgSet("api_key_enabled", "1")
-		}
-		pages.RemovePage("sub")
-		pushPage("sub", apiKeyMenu())
+	list.AddItem("  Set Legacy Key", fmt.Sprintf("Current: %s", legacyMasked), 'k', func() {
+		showInput("Legacy API Key", "sk-...", func(val string) {
+			if val != "" {
+				cfgSet("api_key", val)
+			}
+			pages.RemovePage("sub")
+			pushPage("sub", apiKeyMenu())
+		})
 	})
-	list.AddItem("  View Legacy Key", legacyMasked, 'l', func() {
-		if legacyKey == "" {
-			showMsg("No legacy API key configured.", "apikey", apiKeyMenu)
-		} else {
-			showMsg(fmt.Sprintf("Legacy Key: %s\nStatus: %s%s", legacyKey, legacyStatus, colorReset), "apikey", apiKeyMenu)
-		}
-	})
-	list.AddItem("  Clear Legacy Key", "Remove legacy key", 'x', func() {
+	list.AddItem("  Clear Legacy Key", "Remove legacy key entirely", 'x', func() {
 		cfgSet("api_key", "")
-		cfgSet("api_key_enabled", "0")
 		pages.RemovePage("sub")
 		pushPage("sub", apiKeyMenu())
 	})
@@ -366,7 +365,7 @@ func apiKeyMenu() tview.Primitive {
 
 func apiKeyTableView() tview.Primitive {
 	t := tview.NewTable().SetFixed(1, 0).SetSelectable(true, false)
-	t.SetBorder(true).SetTitle(colorTitle + " API Keys " + colorReset).SetTitleAlign(tview.AlignCenter)
+	t.SetBorder(true).SetTitle(colorTitle + " API Keys — Enter to select " + colorReset).SetTitleAlign(tview.AlignCenter)
 
 	headers := []string{"ID", "Name", "Key", "Status", "Created"}
 	for i, h := range headers {
@@ -396,9 +395,50 @@ func apiKeyTableView() tview.Primitive {
 		t.SetCell(i+1, 4, tview.NewTableCell(formatTS(k.CreatedAt)).SetExpansion(2))
 	}
 
-	view := wrapTable(t)
-	// Add inline actions hint
-	return view
+	// Enter to select a row → show key detail with toggle/copy/delete
+	t.SetSelectedFunc(func(row, col int) {
+		if row < 1 || row > len(keys) {
+			return
+		}
+		k := keys[row-1]
+		status := colorRed + "disabled" + colorReset
+		if k.Enabled {
+			status = colorGreen + "enabled" + colorReset
+		}
+		toggleLabel := "  ✓ Enable"
+		if k.Enabled {
+			toggleLabel = "  ✗ Disable"
+		}
+		detail := tview.NewList()
+		detail.AddItem(fmt.Sprintf("  Name: %s", k.Name), "", 0, nil)
+		detail.AddItem(fmt.Sprintf("  Key:  %s", k.APIKey), colorDim+"(full key visible)"+colorReset, 0, nil)
+		detail.AddItem(fmt.Sprintf("  Status: %s%s", status, colorReset), "", 0, nil)
+		detail.AddItem(toggleLabel, "Toggle enable/disable", 't', func() {
+			if err := toggleAPIKey(k.ID, !k.Enabled); err != nil {
+				showMsg(fmt.Sprintf("%s❌ Error:%s\n%v", colorRed, colorReset, err), "apikey", func() tview.Primitive { return apiKeyTableView() })
+				return
+			}
+			// Rebuild both views
+			pages.RemovePage("detail")
+			pages.RemovePage("sub")
+			pushPage("sub", apiKeyTableView())
+		})
+		detail.AddItem("  🗑  Delete", "Remove this key permanently", 'd', func() {
+			if err := removeAPIKey(k.ID); err != nil {
+				showMsg(fmt.Sprintf("%s❌ Error:%s\n%v", colorRed, colorReset, err), "apikey", func() tview.Primitive { return apiKeyTableView() })
+				return
+			}
+			pages.RemovePage("detail")
+			pages.RemovePage("sub")
+			pushPage("sub", apiKeyTableView())
+		})
+		detail.AddItem("  ← Back", "Esc", 'b', func() { pages.RemovePage("detail") })
+		detail.SetBorder(true).SetTitle(fmt.Sprintf(colorTitle+" Key: %s ", k.Name)).SetTitleAlign(tview.AlignCenter)
+		wireEsc(detail)
+		pages.AddAndSwitchToPage("detail", wrapWithHint(detail, fmt.Sprintf("%st%s toggle   %sd%s delete   %sEsc%s back", colorKey, colorReset, colorKey, colorReset, colorKey, colorReset)), true)
+	})
+
+	return wrapTable(t)
 }
 
 // ── Proxy ─────────────────────────────────────────────────────────────────
@@ -684,6 +724,10 @@ func usageMenu() tview.Primitive {
 		AddItem("  Custom Range", "DD-MM-YYYY to DD-MM-YYYY", 'c', func() {
 			showDateInput(func(from, to string) { showUsage("custom", "pat", from, to) })
 		}).
+		AddItem(colorAccent+"  ─── By API Key ───"+colorReset, "", 0, nil).
+		AddItem("  Today (by API Key)", "Since midnight, grouped by API key", 'T', func() { showUsage("today", "apikey") }).
+		AddItem("  This Week (by API Key)", "Past 7 days, grouped by API key", 'W', func() { showUsage("week", "apikey") }).
+		AddItem("  This Month (by API Key)", "Past 30 days, grouped by API key", 'M', func() { showUsage("month", "apikey") }).
 		AddItem("  ← Back", "Esc", 'b', func() { goBack() })
 
 	list.SetBorder(true).SetTitle(colorTitle + " Usage ").SetTitleAlign(tview.AlignCenter)

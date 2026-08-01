@@ -284,14 +284,18 @@ func queryUsageSummary(fromTS, toTS int64) (*UsageSummary, error) {
 		return nil, fmt.Errorf("db not initialized")
 	}
 	s := &UsageSummary{}
+	var errCount interface{}
 	err := db.QueryRow(`
 		SELECT COUNT(*), COALESCE(SUM(total_tokens),0), COALESCE(SUM(credits),0),
 		       COALESCE(CAST(AVG(latency_ms) AS INTEGER),0),
-		       SUM(CASE WHEN status != 200 THEN 1 ELSE 0 END)
+		       COALESCE(SUM(CASE WHEN status != 200 THEN 1 ELSE 0 END),0)
 		FROM request_logs
-		WHERE ts >= ? AND ts <= ?`, fromTS, toTS).Scan(&s.TotalRequests, &s.TotalTokens, &s.TotalCredits, &s.AvgLatencyMs, &s.ErrorCount)
+		WHERE ts >= ? AND ts <= ?`, fromTS, toTS).Scan(&s.TotalRequests, &s.TotalTokens, &s.TotalCredits, &s.AvgLatencyMs, &errCount)
 	if err != nil {
 		return nil, err
+	}
+	if v, ok := errCount.(int64); ok {
+		s.ErrorCount = int(v)
 	}
 	return s, nil
 }

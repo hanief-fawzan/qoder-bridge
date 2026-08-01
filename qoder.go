@@ -911,7 +911,12 @@ func buildQoderRequestBody(modelKey string, messages []ChatMessage, maxTokens in
 			"features": []interface{}{},
 			"text":     lastUser,
 		},
-		"model_config": mc.Raw,
+		"model_config": func() interface{} {
+			if mc.Raw != nil {
+				return mc.Raw
+			}
+			return map[string]interface{}{"key": modelKey}
+		}(),
 		"business": map[string]interface{}{
 			"product":  "cli",
 			"version":  "1.0.0",
