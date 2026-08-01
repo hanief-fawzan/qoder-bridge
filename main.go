@@ -228,9 +228,24 @@ type ChatRequest struct {
 	MaxTokens      int           `json:"max_tokens,omitempty"`
 	Tools          []ToolDef     `json:"tools,omitempty"`
 	ToolChoice     interface{}   `json:"tool_choice,omitempty"`
-	ThinkingEffort string        `json:"thinking_effort,omitempty"` // low, medium, high, xhigh
-	ContextWindow  int           `json:"context_window,omitempty"`  // 200000, 400000, 1000000
-	ReasoningEffort string       `json:"reasoning_effort,omitempty"` // Hermes sends this (OpenAI standard)
+	ThinkingEffort string        `json:"thinking_effort,omitempty"`     // low, medium, high, xhigh
+	ContextWindow  int           `json:"context_window,omitempty"`      // 200000, 400000, 1000000
+	ReasoningEffort string       `json:"reasoning_effort,omitempty"`    // Hermes sends this (OpenAI standard)
+	StreamOptions  *StreamOptions `json:"stream_options,omitempty"`     // {include_usage: true}
+	Temperature    *float64      `json:"temperature,omitempty"`
+	TopP           *float64      `json:"top_p,omitempty"`
+	Stop           interface{}   `json:"stop,omitempty"`
+	User           string        `json:"user,omitempty"`
+	Seed           *int          `json:"seed,omitempty"`
+	N              *int          `json:"n,omitempty"`
+	ResponseFormat interface{}   `json:"response_format,omitempty"`
+}
+
+// StreamOptions mirrors OpenAI's stream_options field. When set with
+// include_usage=true, the bridge emits a final SSE chunk carrying Usage
+// data even if upstream doesn't natively supply it.
+type StreamOptions struct {
+	IncludeUsage bool `json:"include_usage,omitempty"`
 }
 
 type ChatResponse struct {
@@ -661,6 +676,87 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// sendFinalSSEChunk emits the final finish_reason chunk and optional
+// usage chunk (when include_usage is true). Closes the SSE stream with
+// [DONE]. This is the canonical end-of-stream emission for chat
+// completions; matches OpenAI's wire format so clients (Hermes/Claude/
+// Codex) can parse the last chunk reliably.
+//
+// Usage stats are computed from the local estimator — the upstream
+// Qoder API does not currently emit usage in its stream envelopes, so
+// we synthesize it. The numbers are token *estimates*; clients that
+// rely on exact usage should not use this path.
+func sendFinalSSEChunk(w http.ResponseWriter, flusher http.Flusher, id string, created int64, model string, includeUsage bool, finishReason string, messages []ChatMessage, result *ChatResult) {
+	if flusher == nil {
+		return
+	}
+	// 1. finish_reason chunk
+	sendSSE(w, flusher, SSEChunk{
+		ID: id, Object: "chat.completion.chunk", Created: created, Model: model,
+		Choices: []SSEChoice{{Index: 0, Delta: json.RawMessage(`{}`), FinishReason: &finishReason}},
+	})
+	// 2. usage chunk (OpenAI extension)
+	if includeUsage {
+		promptTokens := 0
+		for _, m := range messages {
+			promptTokens += estimateTokens(extractText(m.Content))
+		}
+		completionTokens := 0
+		if result != nil {
+			completionTokens = estimateTokens(result.Text)
+			for _, tc := range result.ToolCalls {
+				completionTokens += estimateTokens(tc.ID + tc.Function.Name + tc.Function.Arguments)
+			}
+		}
+		usageJSON, _ := json.Marshal(map[string]interface{}{
+			"prompt_tokens":     promptTokens,
+			"completion_tokens": completionTokens,
+			"total_tokens":      promptTokens + completionTokens,
+		})
+		// emit usage-only chunk with choices: []
+		fmt.Fprintf(w, "data: {\"id\":%q,\"object\":\"chat.completion.chunk\",\"created\":%d,\"model\":%q,\"choices\":[],\"usage\":%s}\n\n",
+			id, created, model, string(usageJSON))
+	}
+	// 3. terminator
+	fmt.Fprintf(w, "data: [DONE]\n\n")
+	flusher.Flush()
+}
+
+// emitStreamUsageOnlyChunk sends just the usage chunk (no finish_reason
+// already sent). Used after an error chunk that itself carried
+// finish_reason="error" but the client still expects usage accounting.
+func emitStreamUsageOnlyChunk(w http.ResponseWriter, flusher http.Flusher, id string, created int64, model string, messages []ChatMessage, result *ChatResult) {
+	if flusher == nil {
+		return
+	}
+	promptTokens := 0
+	for _, m := range messages {
+		promptTokens += estimateTokens(extractText(m.Content))
+	}
+	completionTokens := 0
+	if result != nil {
+		completionTokens = estimateTokens(result.Text)
+	}
+	usageJSON, _ := json.Marshal(map[string]interface{}{
+		"prompt_tokens":     promptTokens,
+		"completion_tokens": completionTokens,
+		"total_tokens":      promptTokens + completionTokens,
+	})
+	fmt.Fprintf(w, "data: {\"id\":%q,\"object\":\"chat.completion.chunk\",\"created\":%d,\"model\":%q,\"choices\":[],\"usage\":%s}\n\n",
+		id, created, model, string(usageJSON))
+	flusher.Flush()
+}
+
+// wantsStreamUsage returns whether the client requested include_usage
+// via stream_options. nil stream_options or include_usage=false both
+// return false.
+func wantsStreamUsage(req ChatRequest) bool {
+	if req.StreamOptions == nil {
+		return false
+	}
+	return req.StreamOptions.IncludeUsage
+}
+
 func handleStream(w http.ResponseWriter, r *http.Request, req ChatRequest, modelKey string, apikey string) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -730,12 +826,7 @@ func handleStream(w http.ResponseWriter, r *http.Request, req ChatRequest, model
 		if result != nil && len(result.ToolCalls) > 0 {
 			finishReason = "tool_calls"
 		}
-		sendSSE(w, flusher, SSEChunk{
-			ID: id, Object: "chat.completion.chunk", Created: created, Model: req.Model,
-			Choices: []SSEChoice{{Index: 0, Delta: json.RawMessage(`{}`), FinishReason: &finishReason}},
-		})
-		fmt.Fprintf(w, "data: [DONE]\n\n")
-		flusher.Flush()
+		sendFinalSSEChunk(w, flusher, id, created, req.Model, wantsStreamUsage(req), finishReason, req.Messages, result)
 	}
 }
 
@@ -860,12 +951,9 @@ func handleBufferedStream(w http.ResponseWriter, r *http.Request, req ChatReques
 			})
 		}
 		reason := "tool_calls"
-		sendSSE(w, flusher, SSEChunk{
-			ID: id, Object: "chat.completion.chunk", Created: created, Model: req.Model,
-			Choices: []SSEChoice{{Index: 0, Delta: json.RawMessage(`{}`), FinishReason: &reason}},
-		})
+		sendFinalSSEChunk(w, flusher, id, created, req.Model, wantsStreamUsage(req), reason, req.Messages, result)
 	} else {
-		// Send text content
+		// Text-only response: emit content + final stop chunk
 		if text != "" {
 			sendSSE(w, flusher, SSEChunk{
 				ID: id, Object: "chat.completion.chunk", Created: created, Model: req.Model,
@@ -873,14 +961,8 @@ func handleBufferedStream(w http.ResponseWriter, r *http.Request, req ChatReques
 			})
 		}
 		stop := "stop"
-		sendSSE(w, flusher, SSEChunk{
-			ID: id, Object: "chat.completion.chunk", Created: created, Model: req.Model,
-			Choices: []SSEChoice{{Index: 0, Delta: json.RawMessage(`{}`), FinishReason: &stop}},
-		})
+		sendFinalSSEChunk(w, flusher, id, created, req.Model, wantsStreamUsage(req), stop, req.Messages, result)
 	}
-
-	fmt.Fprintf(w, "data: [DONE]\n\n")
-	flusher.Flush()
 }
 
 // ── Combo handlers ──────────────────────────────────────────────────────────
@@ -1059,12 +1141,7 @@ comboRounds:
 			Choices: []SSEChoice{{Index: 0, Delta: json.RawMessage(`{"content":` + mustQuote(errMsg) + `}`)}},
 		})
 		stop := "stop"
-		sendSSE(w, flusher, SSEChunk{
-			ID: id, Object: "chat.completion.chunk", Created: created, Model: comboName,
-			Choices: []SSEChoice{{Index: 0, Delta: json.RawMessage(`{}`), FinishReason: &stop}},
-		})
-		fmt.Fprintf(w, "data: [DONE]\n\n")
-		flusher.Flush()
+		sendFinalSSEChunk(w, flusher, id, created, comboName, wantsStreamUsage(req), stop, req.Messages, nil)
 	}
 }
 
@@ -1093,7 +1170,7 @@ func handleBufferedComboStream(w http.ResponseWriter, r *http.Request, req ChatR
 			// Buffer: no streaming callback
 			result, err := runWithPATRotation(r.Context(), patPool, modelKey, req.Messages, req.MaxTokens, nil, req.Tools, req.ThinkingEffort, req.ContextWindow, r.RemoteAddr, apikey)
 			if err == nil {
-				emitBufferedComboSSE(w, flusher, id, created, comboName, result)
+				emitBufferedComboSSE(w, flusher, id, created, comboName, result, req.Messages, wantsStreamUsage(req))
 				return
 			}
 			lastErr = err
@@ -1119,17 +1196,12 @@ func handleBufferedComboStream(w http.ResponseWriter, r *http.Request, req ChatR
 			Choices: []SSEChoice{{Index: 0, Delta: json.RawMessage(`{"content":` + mustQuote(errMsg) + `}`)}},
 		})
 		stop := "stop"
-		sendSSE(w, flusher, SSEChunk{
-			ID: id, Object: "chat.completion.chunk", Created: created, Model: comboName,
-			Choices: []SSEChoice{{Index: 0, Delta: json.RawMessage(`{}`), FinishReason: &stop}},
-		})
-		fmt.Fprintf(w, "data: [DONE]\n\n")
-		flusher.Flush()
+		sendFinalSSEChunk(w, flusher, id, created, comboName, wantsStreamUsage(req), stop, req.Messages, nil)
 	}
 }
 
 // emitBufferedComboSSE emits a buffered combo response as OpenAI-compatible SSE.
-func emitBufferedComboSSE(w http.ResponseWriter, flusher http.Flusher, id string, created int64, comboName string, result *ChatResult) {
+func emitBufferedComboSSE(w http.ResponseWriter, flusher http.Flusher, id string, created int64, comboName string, result *ChatResult, messages []ChatMessage, includeUsage bool) {
 	if flusher == nil {
 		return
 	}
@@ -1166,10 +1238,7 @@ func emitBufferedComboSSE(w http.ResponseWriter, flusher http.Flusher, id string
 			})
 		}
 		reason := "tool_calls"
-		sendSSE(w, flusher, SSEChunk{
-			ID: id, Object: "chat.completion.chunk", Created: created, Model: comboName,
-			Choices: []SSEChoice{{Index: 0, Delta: json.RawMessage(`{}`), FinishReason: &reason}},
-		})
+		sendFinalSSEChunk(w, flusher, id, created, comboName, includeUsage, reason, messages, result)
 	} else {
 		if text != "" {
 			sendSSE(w, flusher, SSEChunk{
@@ -1178,14 +1247,8 @@ func emitBufferedComboSSE(w http.ResponseWriter, flusher http.Flusher, id string
 			})
 		}
 		stop := "stop"
-		sendSSE(w, flusher, SSEChunk{
-			ID: id, Object: "chat.completion.chunk", Created: created, Model: comboName,
-			Choices: []SSEChoice{{Index: 0, Delta: json.RawMessage(`{}`), FinishReason: &stop}},
-		})
+		sendFinalSSEChunk(w, flusher, id, created, comboName, includeUsage, stop, messages, result)
 	}
-
-	fmt.Fprintf(w, "data: [DONE]\n\n")
-	flusher.Flush()
 }
 
 func handleQuota(w http.ResponseWriter, r *http.Request) {

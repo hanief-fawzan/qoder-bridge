@@ -745,16 +745,13 @@ func showUsage(period string, groupBy string, dates ...string) {
 		rowIdx = 2
 	} else {
 		for _, r := range rows {
-			avgLat := 0
-			if r.Requests > 0 {
-				avgLat = int(r.LastTS-r.FirstTS) / r.Requests
-			}
+			avgLat := r.AvgLatencyMs
 			t.SetCell(rowIdx, 0, tview.NewTableCell(r.Group).SetExpansion(2))
 			t.SetCell(rowIdx, 1, tview.NewTableCell(r.Model).SetExpansion(1))
 			t.SetCell(rowIdx, 2, tview.NewTableCell(fmt.Sprintf("%d", r.Requests)).SetAlign(tview.AlignRight).SetExpansion(1))
 			t.SetCell(rowIdx, 3, tview.NewTableCell(fmt.Sprintf("%d", r.Tokens)).SetAlign(tview.AlignRight).SetExpansion(1))
 			t.SetCell(rowIdx, 4, tview.NewTableCell(fmt.Sprintf("%.2f", r.Credits)).SetAlign(tview.AlignRight).SetExpansion(1))
-			t.SetCell(rowIdx, 5, tview.NewTableCell(fmt.Sprintf("%ds", avgLat)).SetAlign(tview.AlignRight).SetExpansion(1))
+			t.SetCell(rowIdx, 5, tview.NewTableCell(fmt.Sprintf("%dms", avgLat)).SetAlign(tview.AlignRight).SetExpansion(1))
 			rowIdx++
 		}
 	}

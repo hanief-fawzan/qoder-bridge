@@ -212,13 +212,14 @@ func logRequest(e LogEntry) {
 // ── Usage queries ───────────────────────────────────────────────────────────
 
 type UsageRow struct {
-	Group     string // PAT or API key, depending on query type
-	Model     string
-	Requests  int
-	Tokens    int
-	Credits   float64
-	FirstTS   int64
-	LastTS    int64
+	Group       string // PAT or API key, depending on query type
+	Model       string
+	Requests    int
+	Tokens      int
+	Credits     float64
+	FirstTS     int64
+	LastTS      int64
+	AvgLatencyMs int64
 }
 
 // queryUsageByPAT groups usage by PAT + model.
@@ -227,7 +228,11 @@ func queryUsageByPAT(fromTS, toTS int64) ([]UsageRow, error) {
 		return nil, fmt.Errorf("db not initialized")
 	}
 	rows, err := db.Query(`
-		SELECT pat, model, COUNT(*), SUM(total_tokens), SUM(credits), MIN(ts), MAX(ts)
+		SELECT pat, model, COUNT(*),
+		       COALESCE(SUM(total_tokens),0),
+		       COALESCE(SUM(credits),0.0),
+		       MIN(ts), MAX(ts),
+		       COALESCE(CAST(AVG(latency_ms) AS INTEGER),0)
 		FROM request_logs
 		WHERE ts >= ? AND ts <= ?
 		GROUP BY pat, model
@@ -239,7 +244,7 @@ func queryUsageByPAT(fromTS, toTS int64) ([]UsageRow, error) {
 	var out []UsageRow
 	for rows.Next() {
 		var r UsageRow
-		if err := rows.Scan(&r.Group, &r.Model, &r.Requests, &r.Tokens, &r.Credits, &r.FirstTS, &r.LastTS); err != nil {
+		if err := rows.Scan(&r.Group, &r.Model, &r.Requests, &r.Tokens, &r.Credits, &r.FirstTS, &r.LastTS, &r.AvgLatencyMs); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
@@ -253,7 +258,11 @@ func queryUsageByAPIKey(fromTS, toTS int64) ([]UsageRow, error) {
 		return nil, fmt.Errorf("db not initialized")
 	}
 	rows, err := db.Query(`
-		SELECT COALESCE(api_key,'(no key)'), model, COUNT(*), SUM(total_tokens), SUM(credits), MIN(ts), MAX(ts)
+		SELECT COALESCE(api_key,'(no key)'), model, COUNT(*),
+		       COALESCE(SUM(total_tokens),0),
+		       COALESCE(SUM(credits),0.0),
+		       MIN(ts), MAX(ts),
+		       COALESCE(CAST(AVG(latency_ms) AS INTEGER),0)
 		FROM request_logs
 		WHERE ts >= ? AND ts <= ?
 		GROUP BY api_key, model
@@ -265,7 +274,7 @@ func queryUsageByAPIKey(fromTS, toTS int64) ([]UsageRow, error) {
 	var out []UsageRow
 	for rows.Next() {
 		var r UsageRow
-		if err := rows.Scan(&r.Group, &r.Model, &r.Requests, &r.Tokens, &r.Credits, &r.FirstTS, &r.LastTS); err != nil {
+		if err := rows.Scan(&r.Group, &r.Model, &r.Requests, &r.Tokens, &r.Credits, &r.FirstTS, &r.LastTS, &r.AvgLatencyMs); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
