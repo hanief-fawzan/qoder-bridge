@@ -28,6 +28,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"sync"
@@ -551,6 +552,15 @@ func boolToStr(b bool) string {
 }
 
 func handleChat(w http.ResponseWriter, r *http.Request) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("PANIC in handleChat: %v\n%s", r, debug.Stack())
+			// Best-effort error response — header may already be sent.
+			if w.Header().Get("Content-Type") == "" {
+				sendJSONError(w, 500, "internal server error")
+			}
+		}
+	}()
 	if r.Method != "POST" {
 		http.Error(w, `{"error":{"message":"POST required"}}`, 405)
 		return
@@ -644,6 +654,14 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	modelInput := req.Model
+	if modelInput == "" {
+		sendJSONError(w, 400, "model field is required")
+		return
+	}
+	if len(req.Messages) == 0 {
+		sendJSONError(w, 400, "messages field is required and cannot be empty")
+		return
+	}
 	modelKey := resolveModelKey(modelInput)
 
 	// Resolve thinking effort (Hermes sends reasoning_effort, Qoder expects thinking_effort)
@@ -765,6 +783,11 @@ func handleStream(w http.ResponseWriter, r *http.Request, req ChatRequest, model
 	flusher, _ := w.(http.Flusher)
 	id := "chatcmpl-" + uuidString()
 	created := time.Now().Unix()
+	defer func() {
+		if recoverPanic(w, flusher, id, created, req.Model) {
+			return
+		}
+	}()
 	first := true
 
 	result, err := runWithPATRotation(r.Context(), patPool, modelKey, req.Messages, req.MaxTokens, func(text string) {
@@ -888,6 +911,11 @@ func handleBufferedStream(w http.ResponseWriter, r *http.Request, req ChatReques
 	flusher, _ := w.(http.Flusher)
 	id := "chatcmpl-" + uuidString()
 	created := time.Now().Unix()
+	defer func() {
+		if recoverPanic(w, flusher, id, created, req.Model) {
+			return
+		}
+	}()
 
 	// Buffer: no streaming callback
 	result, err := runWithPATRotation(r.Context(), patPool, modelKey, req.Messages, req.MaxTokens, nil, req.Tools, req.ThinkingEffort, req.ContextWindow, r.RemoteAddr, apikey)
@@ -1038,6 +1066,11 @@ func handleComboStream(w http.ResponseWriter, r *http.Request, req ChatRequest, 
 	flusher, _ := w.(http.Flusher)
 	id := "chatcmpl-" + uuidString()
 	created := time.Now().Unix()
+	defer func() {
+		if recoverPanic(w, flusher, id, created, comboName) {
+			return
+		}
+	}()
 
 	const maxRounds = 3
 	var lastErr error
@@ -1156,6 +1189,11 @@ func handleBufferedComboStream(w http.ResponseWriter, r *http.Request, req ChatR
 	flusher, _ := w.(http.Flusher)
 	id := "chatcmpl-" + uuidString()
 	created := time.Now().Unix()
+	defer func() {
+		if recoverPanic(w, flusher, id, created, comboName) {
+			return
+		}
+	}()
 
 	const maxRounds = 3
 	var lastErr error
@@ -1588,10 +1626,36 @@ func sendSSE(w http.ResponseWriter, f http.Flusher, chunk SSEChunk) {
 	f.Flush()
 }
 
+// sendJSONError writes a JSON error response with the given status code.
+// Safe to call after streaming has started — it only sets a header if no
+// header has been written yet, so subsequent streaming chunks still go out
+// (the JSON error appears as the final chunk body if SSE headers were set).
 func sendJSONError(w http.ResponseWriter, code int, msg string) {
+	h, ok := w.(http.ResponseWriter)
+	_ = ok
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
-	json.NewEncoder(w).Encode(map[string]interface{}{"error": map[string]string{"message": msg}})
+	json.NewEncoder(h).Encode(map[string]interface{}{"error": map[string]string{"message": msg}})
+}
+
+// recoverPanic writes a final SSE error chunk when a streaming handler
+// panics, so the client never hangs on a half-dead connection. Returns
+// true if recovered; the caller should return immediately after.
+func recoverPanic(w http.ResponseWriter, flusher http.Flusher, id string, created int64, model string) bool {
+	if r := recover(); r != nil {
+		log.Printf("PANIC recovered in handler: %v\n%s", r, debug.Stack())
+		if flusher != nil {
+			errReason := "error"
+			sendSSE(w, flusher, SSEChunk{
+				ID: id, Object: "chat.completion.chunk", Created: created, Model: model,
+				Choices: []SSEChoice{{Index: 0, Delta: json.RawMessage(`{}`), FinishReason: &errReason}},
+			})
+			fmt.Fprintf(w, "data: [DONE]\n\n")
+			flusher.Flush()
+		}
+		return true
+	}
+	return false
 }
 
 // forwardUpstreamError forwards the raw Qoder API error to the client,

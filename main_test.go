@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -910,6 +911,52 @@ func TestNormalizeMessages_HandlesObjectArguments(t *testing.T) {
 	}
 	if !strings.Contains(got, "terminal") {
 		t.Errorf("expected terminal tool name, got: %s", got)
+	}
+}
+
+func TestRecoverPanicSendsErrorChunk(t *testing.T) {
+	// After SSE headers are sent, a panic in the handler must NOT leave
+	// the client hanging. recoverPanic must emit a final error chunk +
+	// [DONE] before propagating.
+	w := httptest.NewRecorder()
+	w.Header().Set("Content-Type", "text/event-stream")
+	flusher := &flushingRecorder{w, true}
+
+	defer func() {
+		if r := recover(); r == nil {
+			t.Error("expected panic to be recovered")
+		}
+	}()
+	func() {
+		defer func() {
+			if recoverPanic(w, flusher, "chatcmpl-x", 1, "test") {
+				return
+			}
+			panic("simulated panic")
+		}()
+		panic("simulated panic")
+	}()
+
+	body := w.Body.String()
+	if !strings.Contains(body, `"finish_reason":"error"`) {
+		t.Errorf("expected error finish_reason in SSE output, got: %s", body)
+	}
+	if !strings.Contains(body, "[DONE]") {
+		t.Errorf("expected [DONE] terminator in SSE output, got: %s", body)
+	}
+}
+
+// flushingRecorder satisfies http.Flusher by delegating to the underlying
+// httptest.ResponseRecorder's write calls. httptest.ResponseRecorder does
+// NOT implement Flusher by default.
+type flushingRecorder struct {
+	*httptest.ResponseRecorder
+	canFlush bool
+}
+
+func (f *flushingRecorder) Flush() {
+	if f.canFlush {
+		// no-op — recorder buffers, but Flush signals "ready for next chunk"
 	}
 }
 
