@@ -627,8 +627,8 @@ func TestNormalizeMessagesAssistantWithToolCalls(t *testing.T) {
 		t.Fatal("assistant with tool_calls should produce output")
 	}
 	s, ok := out[0].Content.(string)
-	if !ok || !strings.Contains(s, "assistant called tool") {
-		t.Errorf("expected 'assistant called tool' serialization, got %v", out[0].Content)
+	if !ok || !strings.Contains(s, "\"search\"") {
+		t.Errorf("expected tool_calls json block, got %v", out[0].Content)
 	}
 	if !strings.Contains(s, "search") {
 		t.Error("should contain tool name")
@@ -683,8 +683,8 @@ func TestNormalizeMessagesToolsInSystemPrompt(t *testing.T) {
 	if !strings.Contains(system, "read_file") {
 		t.Error("system prompt should contain tool name")
 	}
-	if !strings.Contains(system, "Tool Protocol") {
-		t.Error("system prompt should contain [Tool Protocol]")
+	if !strings.Contains(system, "Tool Calling Protocol") {
+		t.Error("system prompt should contain [CRITICAL: Tool Calling Protocol]")
 	}
 	if !strings.Contains(system, "```json") {
 		t.Error("system prompt should contain ```json format instructions")
@@ -692,10 +692,10 @@ func TestNormalizeMessagesToolsInSystemPrompt(t *testing.T) {
 	if !strings.Contains(system, "tool_calls") {
 		t.Error("system prompt should mention tool_calls format")
 	}
-	if !strings.Contains(system, "Available tools") {
-		t.Error("system prompt should contain English instructions")
+	if !strings.Contains(system, "TOOL CALLING RULES") {
+		t.Error("system prompt should contain TOOL CALLING RULES")
 	}
-	if !strings.Contains(system, "如需调用工具") {
-		t.Error("system prompt should contain Chinese instructions")
+	if !strings.Contains(system, "NEVER describe") {
+		t.Error("system prompt should contain NEVER describe instruction")
 	}
 }

@@ -422,13 +422,15 @@ func normalizeMessages(messages []ChatMessage, tools []ToolDef) ([]ChatMessage, 
 			continue
 		case "assistant":
 			// Serialize assistant message + any tool_calls for context continuity
-			// Matches qoder-proxy: "[assistant called tool: NAME with arguments: ARGS]"
+			// Format matches the tool protocol prompt: ```json {"tool_calls": [...]}
 			parts := []string{}
 			if text != "" {
 				parts = append(parts, text)
 			}
 			if tcRaw, ok := m.Extra["tool_calls"]; ok {
-				if tcArr, ok := tcRaw.([]interface{}); ok {
+				if tcArr, ok := tcRaw.([]interface{}); ok && len(tcArr) > 0 {
+					// Build normalized tool_calls array
+					var normalized []map[string]interface{}
 					for _, tc := range tcArr {
 						if tcMap, ok := tc.(map[string]interface{}); ok {
 							name := "unknown"
@@ -441,8 +443,15 @@ func normalizeMessages(messages []ChatMessage, tools []ToolDef) ([]ChatMessage, 
 									args = a
 								}
 							}
-							parts = append(parts, fmt.Sprintf("[assistant called tool: %s with arguments: %s]", name, args))
+							normalized = append(normalized, map[string]interface{}{
+								"name":      name,
+								"arguments": json.RawMessage(args),
+							})
 						}
+					}
+					if len(normalized) > 0 {
+						tcJSON, _ := json.Marshal(map[string]interface{}{"tool_calls": normalized})
+						parts = append(parts, "```json\n"+string(tcJSON)+"\n```")
 					}
 				}
 			}
@@ -466,19 +475,32 @@ func normalizeMessages(messages []ChatMessage, tools []ToolDef) ([]ChatMessage, 
 			toolDescriptions = append(toolDescriptions, desc)
 		}
 		toolJSON, _ := json.MarshalIndent(toolDescriptions, "", "  ")
-		toolPrompt := fmt.Sprintf(`[Tool Protocol] Available tools:
-
-%s
-
-When you need to call a tool, use ONE of these output formats:
-
-` + "```" + `json
-{"tool_calls": [{"name": "tool_name", "arguments": {}}]}
-` + "```" + `
-
-Or include your reasoning as normal text, then the JSON block.
-If no tool is needed, respond with normal text.
-如需调用工具，请使用以上 JSON 代码块格式。如不需要，直接回复文本。`, string(toolJSON))
+		fence := "```"
+		toolPrompt := "[CRITICAL: Tool Calling Protocol]\n\n" +
+			"You have access to these tools:\n" + string(toolJSON) + "\n\n" +
+			"TOOL CALLING RULES — FOLLOW EXACTLY:\n" +
+			"1. When you need to use a tool, you MUST output a JSON code block like this:\n\n" +
+			fence + "json\n" +
+			"{\"tool_calls\": [{\"name\": \"tool_name\", \"arguments\": {\"param1\": \"value1\"}}]}\n" +
+			fence + "\n\n" +
+			"2. You may include reasoning text BEFORE the JSON block, but the JSON block MUST be the LAST thing you output.\n" +
+			"3. You MUST use the EXACT tool names listed above.\n" +
+			"4. You MUST provide ALL required parameters.\n" +
+			"5. For multiple tool calls, put them all in one block:\n" +
+			fence + "json\n" +
+			"{\"tool_calls\": [{\"name\": \"tool1\", \"arguments\": {\"a\": 1}}, {\"name\": \"tool2\", \"arguments\": {\"b\": 2}}]}\n" +
+			fence + "\n\n" +
+			"6. NEVER describe what you would do — just call the tool directly.\n" +
+			"7. NEVER output a tool call as plain text — it MUST be inside a " + fence + "json" + fence + " code block.\n" +
+			"8. If no tool is needed, respond with normal text.\n\n" +
+			"EXAMPLE — Reading a file:\n" +
+			fence + "json\n" +
+			"{\"tool_calls\": [{\"name\": \"read_file\", \"arguments\": {\"path\": \"/etc/hostname\"}}]}\n" +
+			fence + "\n\n" +
+			"EXAMPLE — Running a command:\n" +
+			fence + "json\n" +
+			"{\"tool_calls\": [{\"name\": \"terminal\", \"arguments\": {\"command\": \"ls -la\"}}]}\n" +
+			fence
 		systemParts = append([]string{toolPrompt}, systemParts...)
 	}
 
@@ -555,7 +577,8 @@ func truncate(s string, n int) string {
 }
 
 // Regex for ```json ... ``` blocks — compiled once at package level.
-var jsonBlockRe = regexp.MustCompile("(?s)```json\\s*\\n([\\s\\S]*?)\\n```")
+// Supports: ```json, ```, ```tool_call, ```function_call — with or without newline after tag.
+var jsonBlockRe = regexp.MustCompile("(?s)" + "`" + "`" + "`" + `(?:json|tool_call|function_call)?\s*\n?([\s\S]*?)\n?\s*` + "`" + "`" + "`")
 
 // Regex for [assistant called tool: NAME with arguments: ...] text format.
 // Captures the tool name; arguments are extracted separately via balanced
@@ -1060,11 +1083,20 @@ func callQoder(ctx context.Context, pat, modelKey string, messages []ChatMessage
 		allToolCalls = textToolCalls
 	} else if len(nativeToolCalls) > 0 {
 		for _, tc := range nativeToolCalls {
+			// Support both flat format {"name":"...","arguments":{...}}
+			// and OpenAI format {"function":{"name":"...","arguments":"..."}}
 			name, _ := tc["name"].(string)
+			args := tc["arguments"]
+			if name == "" {
+				// Try OpenAI nested format
+				if fn, ok := tc["function"].(map[string]interface{}); ok {
+					name, _ = fn["name"].(string)
+					args = fn["arguments"]
+				}
+			}
 			if name == "" {
 				continue
 			}
-			args := tc["arguments"]
 			var argsJSON string
 			switch a := args.(type) {
 			case string:
@@ -1078,8 +1110,13 @@ func callQoder(ctx context.Context, pat, modelKey string, messages []ChatMessage
 			if argsJSON == "" {
 				argsJSON = "{}"
 			}
+			// Use existing ID if present, otherwise generate
+			callID, _ := tc["id"].(string)
+			if callID == "" {
+				callID = generateCallID()
+			}
 			allToolCalls = append(allToolCalls, ToolCall{
-				ID:       generateCallID(),
+				ID:       callID,
 				Type:     "function",
 				Function: ToolCallFn{Name: name, Arguments: argsJSON},
 			})
