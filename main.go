@@ -45,6 +45,7 @@ var (
 	combos       map[string][]string // combo name -> model list
 	apiKey       string              // optional: sk-* API key for auth
 	requestDelay int                 // max random delay in ms (0 = disabled)
+	startTime    = time.Now()        // server start time for uptime tracking
 )
 
 // ── Models ──────────────────────────────────────────────────────────────────
@@ -89,7 +90,7 @@ var knownModelKeys = func() map[string]bool {
 // ── PAT Pool (round-robin or random) ────────────────────────────────────────
 
 type PATPool struct {
-	mu       sync.Mutex
+	mu       sync.RWMutex
 	pats     []string
 	idx      int
 	strategy string // "round-robin" or "random"
@@ -269,6 +270,86 @@ type SSEChoice struct {
 func handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok", "engine": "cosy-pure-go"})
+}
+
+// handleStatus returns diagnostics: proxy egress IP, DB info, PAT pool status, uptime.
+// This helps debug whether MicroWARP/proxy is working and DB is logging.
+func handleStatus(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	type patInfo struct {
+		PAT       string `json:"pat"`
+		Available bool   `json:"available"`
+		Cooldown  string `json:"cooldown,omitempty"`
+	}
+
+	type statusResp struct {
+		Uptime       string   `json:"uptime"`
+		Proxy        string   `json:"proxy"`
+		ProxyCount   int      `json:"proxy_count"`
+		EgressIP     string   `json:"egress_ip"`
+		DBPath       string   `json:"db_path"`
+		DBWorking    bool     `json:"db_working"`
+		DBSize       string   `json:"db_size"`
+		LogCount     int64    `json:"log_count"`
+		PATStrategy  string   `json:"pat_strategy"`
+		PATCount     int      `json:"pat_count"`
+		PATs         []patInfo `json:"pats"`
+		Combos       []string `json:"combos"`
+	}
+
+	resp := statusResp{
+		Uptime:      time.Since(startTime).Round(time.Second).String(),
+		Proxy:       getProxyInfo(),
+		ProxyCount:  proxyCount(),
+		DBPath:      dbLocation(),
+		DBWorking:   db != nil,
+		PATStrategy: patPool.strategy,
+		PATCount:    len(pats),
+	}
+
+	// Egress IP check (5s timeout, uses proxy pool)
+	if client := proxyClientFn(); client != nil {
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		req, _ := http.NewRequestWithContext(ctx, "GET", "https://api.ipify.org?format=text", nil)
+		if resp2, err := client.Do(req); err == nil {
+			body, _ := io.ReadAll(resp2.Body)
+			resp2.Body.Close()
+			resp.EgressIP = strings.TrimSpace(string(body))
+		} else {
+			resp.EgressIP = "check failed: " + err.Error()
+		}
+		cancel()
+	}
+
+	// DB stats
+	if db != nil {
+		if info, err := os.Stat(dbLocation()); err == nil {
+			resp.DBSize = fmt.Sprintf("%d KB", info.Size()/1024)
+		}
+		db.QueryRow(`SELECT COUNT(*) FROM request_logs`).Scan(&resp.LogCount)
+	}
+
+	// PAT pool status
+	patPool.mu.RLock()
+	for _, pat := range pats {
+		info := patInfo{PAT: maskPAT(pat), Available: patPool.isAvailable(pat)}
+		if deadline, ok := patPool.cooldown[pat]; ok && time.Now().Before(deadline) {
+			info.Cooldown = fmt.Sprintf("%dm remaining", int(time.Until(deadline).Minutes())+1)
+		}
+		resp.PATs = append(resp.PATs, info)
+	}
+	patPool.mu.RUnlock()
+
+	// Combo names
+	if combos != nil {
+		for name := range combos {
+			resp.Combos = append(resp.Combos, name)
+		}
+		sort.Strings(resp.Combos)
+	}
+
+	json.NewEncoder(w).Encode(resp)
 }
 
 func handleModels(w http.ResponseWriter, r *http.Request) {
@@ -475,7 +556,7 @@ func handleStream(w http.ResponseWriter, r *http.Request, req ChatRequest, model
 				Choices: []SSEChoice{{Index: 0, Delta: json.RawMessage(`{"content":` + mustQuote(text) + `}`)}},
 			})
 		}
-	}, req.Tools, req.ThinkingEffort, req.ContextWindow)
+	}, req.Tools, req.ThinkingEffort, req.ContextWindow, r.RemoteAddr)
 
 	if err != nil {
 		log.Printf("stream error: %v", err)
@@ -522,7 +603,7 @@ func handleStream(w http.ResponseWriter, r *http.Request, req ChatRequest, model
 }
 
 func handleNonStream(w http.ResponseWriter, r *http.Request, req ChatRequest, modelKey string) {
-	result, err := runWithPATRotation(r.Context(), patPool, modelKey, req.Messages, req.MaxTokens, nil, req.Tools, req.ThinkingEffort, req.ContextWindow)
+	result, err := runWithPATRotation(r.Context(), patPool, modelKey, req.Messages, req.MaxTokens, nil, req.Tools, req.ThinkingEffort, req.ContextWindow, r.RemoteAddr)
 	if err != nil {
 		forwardUpstreamError(w, err)
 		return
@@ -565,7 +646,7 @@ func handleBufferedStream(w http.ResponseWriter, r *http.Request, req ChatReques
 	created := time.Now().Unix()
 
 	// Buffer: no streaming callback
-	result, err := runWithPATRotation(r.Context(), patPool, modelKey, req.Messages, req.MaxTokens, nil, req.Tools, req.ThinkingEffort, req.ContextWindow)
+	result, err := runWithPATRotation(r.Context(), patPool, modelKey, req.Messages, req.MaxTokens, nil, req.Tools, req.ThinkingEffort, req.ContextWindow, r.RemoteAddr)
 
 	if err != nil {
 		log.Printf("buffered stream error: %v", err)
@@ -668,7 +749,7 @@ func handleComboNonStream(w http.ResponseWriter, r *http.Request, req ChatReques
 			}
 			log.Printf("combo %q: round %d, trying qd/%s", comboName, round+1, modelKey)
 
-			result, err := runWithPATRotation(r.Context(), patPool, modelKey, req.Messages, req.MaxTokens, nil, req.Tools, req.ThinkingEffort, req.ContextWindow)
+			result, err := runWithPATRotation(r.Context(), patPool, modelKey, req.Messages, req.MaxTokens, nil, req.Tools, req.ThinkingEffort, req.ContextWindow, r.RemoteAddr)
 			if err == nil {
 				text := ""
 				if result != nil {
@@ -742,7 +823,7 @@ comboRounds:
 						Choices: []SSEChoice{{Index: 0, Delta: json.RawMessage(`{"content":` + mustQuote(text) + `}`)}},
 					})
 				}
-			}, req.Tools, req.ThinkingEffort, req.ContextWindow)
+			}, req.Tools, req.ThinkingEffort, req.ContextWindow, r.RemoteAddr)
 
 			if err == nil {
 				_ = result
@@ -846,7 +927,7 @@ func handleBufferedComboStream(w http.ResponseWriter, r *http.Request, req ChatR
 			log.Printf("combo %q: round %d, trying qd/%s", comboName, round+1, modelKey)
 
 			// Buffer: no streaming callback
-			result, err := runWithPATRotation(r.Context(), patPool, modelKey, req.Messages, req.MaxTokens, nil, req.Tools, req.ThinkingEffort, req.ContextWindow)
+			result, err := runWithPATRotation(r.Context(), patPool, modelKey, req.Messages, req.MaxTokens, nil, req.Tools, req.ThinkingEffort, req.ContextWindow, r.RemoteAddr)
 			if err == nil {
 				emitBufferedComboSSE(w, flusher, id, created, comboName, result)
 				return
@@ -963,7 +1044,7 @@ func handleQuota(w http.ResponseWriter, r *http.Request) {
 
 // ── PAT rotation ────────────────────────────────────────────────────────────
 
-func runWithPATRotation(ctx context.Context, pool *PATPool, modelKey string, messages []ChatMessage, maxTokens int, onChunk StreamCallback, tools []ToolDef, thinkingEffort string, contextWindow int) (*ChatResult, error) {
+func runWithPATRotation(ctx context.Context, pool *PATPool, modelKey string, messages []ChatMessage, maxTokens int, onChunk StreamCallback, tools []ToolDef, thinkingEffort string, contextWindow int, clientIP string) (*ChatResult, error) {
 	start := time.Now()
 
 	// Smart anti-ban delay: random jitter between 0 and requestDelay ms
@@ -993,6 +1074,7 @@ func runWithPATRotation(ctx context.Context, pool *PATPool, modelKey string, mes
 			break
 		}
 		used[pat] = true
+		log.Printf("qd %s: selected PAT %s (attempt %d/%d)", modelKey, maskPAT(pat), attempt+1, maxAttempts)
 		emitted := false
 		callback := onChunk
 		if onChunk != nil {
@@ -1038,6 +1120,11 @@ done:
 	completionTokens := 0
 	if lastErr == nil && result != nil {
 		completionTokens = estimateTokens(result.Text)
+		if len(result.ToolCalls) > 0 {
+			for _, tc := range result.ToolCalls {
+				completionTokens += estimateTokens(tc.ID + tc.Function.Name + tc.Function.Arguments)
+			}
+		}
 	}
 	totalTokens := promptTokens + completionTokens
 	credits := estimateCredits(modelKey, totalTokens)
@@ -1060,8 +1147,15 @@ done:
 		Status:           status,
 		Error:            errMsg,
 		LatencyMs:        latency,
-		ClientIP:         "",
+		ClientIP:         clientIP,
 	})
+
+	proxyLabel := getProxyInfo()
+	if lastErr != nil {
+		log.Printf("qd %s: request failed: %v (pat: %s, proxy: %s, %dms)", modelKey, lastErr, maskPAT(pat), proxyLabel, latency)
+	} else {
+		log.Printf("qd %s: request ok (pat: %s, proxy: %s, %d tokens, %dms)", modelKey, maskPAT(pat), proxyLabel, totalTokens, latency)
+	}
 
 	if lastErr != nil {
 		return nil, lastErr
@@ -1577,6 +1671,7 @@ func runServe(args []string) {
 	mux.HandleFunc("/v1/chat/completions", handleChat)
 	mux.HandleFunc("/v1/quota", handleQuota)
 	mux.HandleFunc("/v1/combos", handleCombos)
+	mux.HandleFunc("/v1/status", handleStatus)
 
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	log.Printf("")
@@ -1586,7 +1681,9 @@ func runServe(args []string) {
 	log.Printf("    models:  http://%s/v1/models", addr)
 	log.Printf("    quota:   http://%s/v1/quota", addr)
 	log.Printf("    combos:  http://%s/v1/combos", addr)
+	log.Printf("    status:  http://%s/v1/status", addr)
 	log.Printf("    health:  http://%s/health", addr)
+	log.Printf("  db:      %s", dbLocation())
 	log.Printf("  engine:  pure Go COSY (no qodercli)")
 	log.Printf("  proxy:   %s", getProxyInfo())
 	if apiKey != "" {

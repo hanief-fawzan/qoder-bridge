@@ -24,10 +24,22 @@ var (
 )
 
 // dbLocation returns the DB file path, creating parent dirs.
+// Uses the bridge's working directory (where .env lives), not $HOME.
+// This ensures the DB stays with the bridge installation regardless
+// of which user runs the service.
 func dbLocation() string {
 	if dbPath != "" {
 		return dbPath
 	}
+	// Try working directory first (where .env and install.sh live)
+	wd, err := os.Getwd()
+	if err == nil && wd != "/" && wd != "/root" {
+		dir := filepath.Join(wd, ".qoder-bridge")
+		os.MkdirAll(dir, 0755)
+		dbPath = filepath.Join(dir, "data.db")
+		return dbPath
+	}
+	// Fallback: $HOME/.qoder-bridge
 	dir := filepath.Join(os.Getenv("HOME"), ".qoder-bridge")
 	os.MkdirAll(dir, 0755)
 	dbPath = filepath.Join(dir, "data.db")
@@ -153,6 +165,7 @@ type LogEntry struct {
 	ClientIP         string
 }
 
+// logRequest inserts a request log entry into the DB.
 func logRequest(e LogEntry) {
 	if db == nil {
 		return
@@ -161,11 +174,14 @@ func logRequest(e LogEntry) {
 	if e.Stream {
 		stream = 1
 	}
-	db.Exec(`INSERT INTO request_logs(ts,pat,model,stream,prompt_tokens,completion_tokens,total_tokens,credits,status,error,latency_ms,client_ip)
+	_, err := db.Exec(`INSERT INTO request_logs(ts,pat,model,stream,prompt_tokens,completion_tokens,total_tokens,credits,status,error,latency_ms,client_ip)
 		VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
 		time.Now().Unix(), e.PAT, e.Model, stream,
 		e.PromptTokens, e.CompletionTokens, e.TotalTokens, e.Credits,
 		e.Status, e.Error, e.LatencyMs, e.ClientIP)
+	if err != nil {
+		log.Printf("db: failed to log request: %v", err)
+	}
 }
 
 // ── Usage queries ───────────────────────────────────────────────────────────
