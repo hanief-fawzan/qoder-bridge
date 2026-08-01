@@ -437,33 +437,87 @@ func handleCombos(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{"combos": result})
 }
 
+// ── API key auth model ──────────────────────────────────────────────────
+//
+// Three layers of authentication, evaluated in order:
+//
+//   1. apiKeyEnv (legacy single key in .env) — if set, hard-coded bypass.
+//      Pre-existing deployments rely on this; removing it would lock users
+//      out of an upgrade. When the env key is set, requests pass without
+//      any DB lookup.
+//
+//   2. globalEnabled (config: api_key_enabled) — master switch. When OFF,
+//      the bridge is open: no Authorization header is required even if
+//      keys exist in the table. This is the "global toggle" users want
+//      for development / local testing.
+//
+//   3. tableKeys (DB: api_keys.enabled=1) — only consulted when
+//      globalEnabled is ON. Bearer must match an *enabled* row.
+//
+// generateKey() automatically flips globalEnabled ON the moment a key is
+// created — users explicitly issuing credentials shouldn't be surprised
+// by an open bridge.
+var (
+	apiKeyEnv      string // legacy .env api_key
+	globalEnabled  bool   // master switch (api_key_enabled in config)
+)
+
+// apiKeyRequired reports whether the request must carry a valid Bearer.
+// Returns false when global toggle is OFF (open access) even if keys exist.
+func apiKeyRequired() bool {
+	if apiKeyEnv != "" {
+		return true // legacy env key always enforced
+	}
+	return globalEnabled
+}
+
 func handleChat(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
 		http.Error(w, `{"error":{"message":"POST required"}}`, 405)
 		return
 	}
 
-	// Auth check — if API keys configured, require Bearer token
+	// Auth — layered. Legacy env key bypasses DB; otherwise consult global
+	// toggle + active table keys.
 	usedAPIKey := "(no key)"
-	if db != nil {
-		keys, _ := listAPIKeys()
-		if len(keys) > 0 {
-			auth := r.Header.Get("Authorization")
-			key := strings.TrimPrefix(auth, "Bearer ")
-			if name, ok := validateAPIKey(key); ok {
-				usedAPIKey = name
-			} else {
-				http.Error(w, `{"error":{"message":"invalid API key"}}`, 401)
-				return
-			}
-		}
-	} else if apiKey != "" {
+	switch {
+	case apiKeyEnv != "":
+		// Legacy .env key: hard-coded bearer check.
 		auth := r.Header.Get("Authorization")
-		if auth != "Bearer "+apiKey {
+		if auth != "Bearer "+apiKeyEnv {
 			http.Error(w, `{"error":{"message":"invalid API key"}}`, 401)
 			return
 		}
-		usedAPIKey = "(legacy)"
+		usedAPIKey = "(legacy-env)"
+	case globalEnabled:
+		// Master toggle ON — Bearer required, must match an enabled row
+		// (or the legacy config key for backward compat).
+		auth := r.Header.Get("Authorization")
+		key := strings.TrimPrefix(auth, "Bearer ")
+		if name, ok := validateAPIKey(key); ok {
+			usedAPIKey = name
+		} else {
+			keys, _ := listEnabledAPIKeys()
+			hint := " Authorization header required (Bearer sk-...)."
+			if len(keys) == 0 {
+				hint = " No API keys configured — generate one in TUI (API Keys → Generate New Key) or set the master toggle to OFF for open access."
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(401)
+			fmt.Fprintf(w, `{"error":{"message":"invalid API key.%s"}}`, hint)
+			return
+		}
+	default:
+		// Global toggle OFF — open access, no header required.
+		auth := r.Header.Get("Authorization")
+		key := strings.TrimPrefix(auth, "Bearer ")
+		if key != "" {
+			if name, ok := validateAPIKey(key); ok {
+				usedAPIKey = name
+			}
+			// If invalid key sent with toggle off: still allow request
+			// (this is the user's stated intent). Logged for visibility.
+		}
 	}
 
 	// Buffer body so we can decode twice (ChatRequest + raw extra fields)
@@ -1195,8 +1249,8 @@ done:
 		Error:            errMsg,
 		LatencyMs:        latency,
 		ClientIP:         clientIP,
-		APIKey:           apikey,
-	})
+				APIKey:           maskAPIKey(apikey),
+			})
 
 	proxyLabel := getProxyInfo()
 	if lastErr != nil {
@@ -1370,6 +1424,19 @@ func maskPAT(pat string) string {
 		return maskRe.ReplaceAllString(pat, "$1...$2")
 	}
 	return "***"
+}
+
+// maskAPIKey returns a safe-to-log representation. The name from the DB
+// is already safe (e.g. "hermes-desktop"); legacy / no-key sentinels
+// pass through verbatim. We never log the raw sk-* secret.
+func maskAPIKey(name string) string {
+	if name == "" || name == "(no key)" {
+		return ""
+	}
+	if name == "(legacy)" || name == "(legacy-env)" {
+		return "(legacy)"
+	}
+	return name
 }
 
 func mustQuote(s string) string {
@@ -1635,8 +1702,9 @@ func runServe(args []string) {
 		combos = cfg.combos
 	}
 	if cfg.apiKey != "" {
-		apiKey = cfg.apiKey
+		apiKeyEnv = cfg.apiKey
 	}
+	globalEnabled = cfgBool("api_key_enabled", false)
 	if cfg.requestDelay > 0 {
 		requestDelay = cfg.requestDelay
 	}

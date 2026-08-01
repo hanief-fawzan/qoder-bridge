@@ -301,17 +301,22 @@ func apiKeyMenu() tview.Primitive {
 		keys = []APIKeyEntry{}
 	}
 
-	// Master auth toggle: is API key authentication required?
-	authRequired := cfgBool("api_key_enabled", false) || len(keys) > 0
-	authStatus := colorRed + "disabled — open access"
+	// Master auth toggle: independent of whether keys exist.
+	// OFF = open access (no Bearer required). ON = Bearer required.
+	authRequired := cfgBool("api_key_enabled", false)
+	authStatus := colorRed + "OFF — open access (no key required)"
 	if authRequired {
-		authStatus = colorGreen + "enabled — key required"
+		authStatus = colorGreen + "ON — Bearer key required"
 	}
 
 	list := tview.NewList()
-	list.AddItem("  🔒  Require API Key", fmt.Sprintf("Auth: %s%s", authStatus, colorReset), 'r', func() {
+	list.AddItem("  🔒  Require API Key", fmt.Sprintf("Global auth: %s%s", authStatus, colorReset), 'r', func() {
 		current := cfgBool("api_key_enabled", false)
-		cfgSet("api_key_enabled", map[bool]string{true: "0", false: "1"}[current])
+		if current {
+			cfgSet("api_key_enabled", "0")
+		} else {
+			cfgSet("api_key_enabled", "1")
+		}
 		pages.RemovePage("sub")
 		pushPage("sub", apiKeyMenu())
 	})
@@ -327,7 +332,13 @@ func apiKeyMenu() tview.Primitive {
 				showMsg(fmt.Sprintf("%s❌ Failed:%s\n%v", colorRed, colorReset, err), "apikey", apiKeyMenu)
 				return
 			}
-			showMsg(fmt.Sprintf("%s✅ Generated key [%s]:%s\n%s\n\nCopy this key now — it won't be shown again in full.", colorGreen, name, colorReset, newKey), "apikey", apiKeyMenu)
+			// Auto-enable the master toggle so the freshly-issued key is
+			// actually required. Users generating a credential expect the
+			// bridge to start demanding it.
+			if !cfgBool("api_key_enabled", false) {
+				cfgSet("api_key_enabled", "1")
+			}
+			showMsg(fmt.Sprintf("%s✅ Generated key [%s]:%s\n%s\n\nGlobal auth toggled ON — this key is now required.\nCopy this key now — it won't be shown again in full.", colorGreen, name, colorReset, newKey), "apikey", apiKeyMenu)
 			pages.RemovePage("sub")
 			pushPage("sub", apiKeyMenu())
 		})

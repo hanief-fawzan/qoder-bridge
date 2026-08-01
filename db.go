@@ -332,6 +332,31 @@ func listAPIKeys() ([]APIKeyEntry, error) {
 	return out, nil
 }
 
+// listEnabledAPIKeys returns only rows where enabled=1. Used by the auth
+// path so disabled rows don't count as valid bearers even if their name
+// matches.
+func listEnabledAPIKeys() ([]APIKeyEntry, error) {
+	if db == nil {
+		return nil, fmt.Errorf("db not initialized")
+	}
+	rows, err := db.Query(`SELECT id, name, api_key, enabled, created_at FROM api_keys WHERE enabled = 1 ORDER BY created_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []APIKeyEntry
+	for rows.Next() {
+		var k APIKeyEntry
+		var en int
+		if err := rows.Scan(&k.ID, &k.Name, &k.APIKey, &en, &k.CreatedAt); err != nil {
+			continue
+		}
+		k.Enabled = true
+		out = append(out, k)
+	}
+	return out, nil
+}
+
 func addAPIKey(name, key string) error {
 	if db == nil {
 		return fmt.Errorf("db not initialized")
