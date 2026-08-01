@@ -634,13 +634,29 @@ func handleNonStream(w http.ResponseWriter, r *http.Request, req ChatRequest, mo
 		choices = []Choice{{Index: 0, Message: &Message{Role: "assistant", Content: text, ToolCalls: result.ToolCalls}, FinishReason: "tool_calls"}}
 	}
 
+	promptTokens := 0
+	for _, m := range req.Messages {
+		promptTokens += estimateTokens(extractText(m.Content))
+	}
+	completionTokens := 0
+	if result != nil {
+		completionTokens = estimateTokens(result.Text)
+		for _, tc := range result.ToolCalls {
+			completionTokens += estimateTokens(tc.ID + tc.Function.Name + tc.Function.Arguments)
+		}
+	}
+
 	resp := ChatResponse{
 		ID:      "chatcmpl-" + uuidString(),
 		Object:  "chat.completion",
 		Created: time.Now().Unix(),
 		Model:   req.Model,
 		Choices: choices,
-		Usage:   Usage{},
+		Usage: Usage{
+			PromptTokens:     promptTokens,
+			CompletionTokens: completionTokens,
+			TotalTokens:      promptTokens + completionTokens,
+		},
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
@@ -773,13 +789,30 @@ func handleComboNonStream(w http.ResponseWriter, r *http.Request, req ChatReques
 				if result != nil && len(result.ToolCalls) > 0 {
 					choices = []Choice{{Index: 0, Message: &Message{Role: "assistant", Content: text, ToolCalls: result.ToolCalls}, FinishReason: "tool_calls"}}
 				}
+
+				promptTokens := 0
+				for _, m := range req.Messages {
+					promptTokens += estimateTokens(extractText(m.Content))
+				}
+				completionTokens := 0
+				if result != nil {
+					completionTokens = estimateTokens(result.Text)
+					for _, tc := range result.ToolCalls {
+						completionTokens += estimateTokens(tc.ID + tc.Function.Name + tc.Function.Arguments)
+					}
+				}
+
 				resp := ChatResponse{
 					ID:      "chatcmpl-" + uuidString(),
 					Object:  "chat.completion",
 					Created: time.Now().Unix(),
 					Model:   comboName,
 					Choices: choices,
-					Usage:   Usage{},
+					Usage: Usage{
+						PromptTokens:     promptTokens,
+						CompletionTokens: completionTokens,
+						TotalTokens:      promptTokens + completionTokens,
+					},
 				}
 				w.Header().Set("Content-Type", "application/json")
 				json.NewEncoder(w).Encode(resp)
