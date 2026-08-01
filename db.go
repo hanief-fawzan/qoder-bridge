@@ -74,7 +74,8 @@ func migrate(d *sql.DB) error {
 			status INTEGER DEFAULT 0,
 			error TEXT DEFAULT '',
 			latency_ms INTEGER DEFAULT 0,
-			client_ip TEXT DEFAULT ''
+			client_ip TEXT DEFAULT '',
+			api_key TEXT DEFAULT ''
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_logs_ts ON request_logs(ts)`,
 		`CREATE INDEX IF NOT EXISTS idx_logs_pat ON request_logs(pat)`,
@@ -94,15 +95,19 @@ func migrate(d *sql.DB) error {
 			created_at INTEGER NOT NULL
 		)`,
 
-		// Add api_key column to logs for per-key usage
-		`ALTER TABLE request_logs ADD COLUMN api_key TEXT DEFAULT ''`,
-
 		// DB size guard: we aim for <100MB
 		`PRAGMA auto_vacuum=INCREMENTAL`,
 	}
 	for _, s := range stmts {
 		if _, err := d.Exec(s); err != nil {
 			return fmt.Errorf("migrate: %w", err)
+		}
+	}
+	// Idempotent column add: ALTER TABLE ADD COLUMN fails if column exists,
+	// so we catch and ignore the "duplicate column" error.
+	if _, err := d.Exec(`ALTER TABLE request_logs ADD COLUMN api_key TEXT DEFAULT ''`); err != nil {
+		if !strings.Contains(err.Error(), "duplicate column") {
+			return fmt.Errorf("migrate: add api_key column: %w", err)
 		}
 	}
 	return nil
