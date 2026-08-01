@@ -132,6 +132,10 @@ func importEnvFromConfig(cfg *envConfig) {
 	if p := os.Getenv("QODER_PROXY"); p != "" && cfgGet("proxy") == "" {
 		imports["proxy"] = p
 	}
+	// Domain from .env
+	if cfg.domain != "" && cfgGet("domain") == "" {
+		imports["domain"] = cfg.domain
+	}
 	if len(imports) == 0 {
 		return
 	}

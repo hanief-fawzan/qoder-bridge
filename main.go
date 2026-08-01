@@ -1368,6 +1368,7 @@ type envConfig struct {
 	combos       map[string][]string
 	apiKey       string // optional: sk-* API key for auth
 	requestDelay int    // max random delay in ms between requests (0 = disabled)
+	domain       string // optional: public domain for endpoint URLs
 }
 
 func loadEnv(envPath string) *envConfig {
@@ -1461,6 +1462,11 @@ func loadEnv(envPath string) *envConfig {
 		case key == "QODER_PROXY":
 			if val != "" {
 				os.Setenv("QODER_PROXY", val)
+			}
+
+		case key == "QODER_DOMAIN":
+			if val != "" {
+				cfg.domain = val
 			}
 
 		case strings.HasPrefix(key, "pt-"):
