@@ -433,21 +433,41 @@ func normalizeMessages(messages []ChatMessage, tools []ToolDef) ([]ChatMessage, 
 					var normalized []map[string]interface{}
 					for _, tc := range tcArr {
 						if tcMap, ok := tc.(map[string]interface{}); ok {
-							name := "unknown"
-							args := "{}"
-							if fn, ok := tcMap["function"].(map[string]interface{}); ok {
-								if n, ok := fn["name"].(string); ok {
-									name = n
-								}
-								if a, ok := fn["arguments"].(string); ok {
-									args = a
-								}
-							}
-							normalized = append(normalized, map[string]interface{}{
-								"name":      name,
-								"arguments": json.RawMessage(args),
-							})
-						}
+												name := "unknown"
+												args := "{}"
+												if fn, ok := tcMap["function"].(map[string]interface{}); ok {
+													if n, ok := fn["name"].(string); ok {
+														name = n
+													}
+													// OpenAI sends arguments as JSON string.
+													// Anthropic / Gemini / older proxies send it as
+													// a nested object — accept either, never silently
+													// drop to {} (which would erase the user's
+													// intent on tool calls).
+													switch a := fn["arguments"].(type) {
+													case string:
+														if a != "" {
+															args = a
+														}
+													case map[string]interface{}:
+														if b, err := json.Marshal(a); err == nil {
+															args = string(b)
+														}
+													case []interface{}:
+														if b, err := json.Marshal(a); err == nil {
+															args = string(b)
+														}
+													default:
+														if b, err := json.Marshal(a); err == nil {
+															args = string(b)
+														}
+													}
+												}
+												normalized = append(normalized, map[string]interface{}{
+													"name":      name,
+													"arguments": json.RawMessage(args),
+												})
+											}
 					}
 					if len(normalized) > 0 {
 						tcJSON, _ := json.Marshal(map[string]interface{}{"tool_calls": normalized})

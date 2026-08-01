@@ -880,6 +880,39 @@ func TestNormalizeMessages_PreservesToolResultChain(t *testing.T) {
 	}
 }
 
+func TestNormalizeMessages_HandlesObjectArguments(t *testing.T) {
+	// Anthropic / Gemini protocol sends arguments as a nested object,
+	// not a JSON string. The bridge must accept both — silently dropping
+	// to {} would erase user intent on tool calls.
+	msgs := []ChatMessage{{
+		Role: "assistant",
+		Content: "",
+		Extra: map[string]interface{}{
+			"tool_calls": []interface{}{
+				map[string]interface{}{
+					"function": map[string]interface{}{
+						"name": "terminal",
+						"arguments": map[string]interface{}{
+							"command": "ls -la",
+						},
+					},
+				},
+			},
+		},
+	}}
+	out, _ := normalizeMessages(msgs, nil)
+	if len(out) == 0 {
+		t.Fatal("expected one normalized message")
+	}
+	got := out[0].Content.(string)
+	if !strings.Contains(got, `"command"`) || !strings.Contains(got, `"ls -la"`) {
+		t.Errorf("expected command in tool call args, got: %s", got)
+	}
+	if !strings.Contains(got, "terminal") {
+		t.Errorf("expected terminal tool name, got: %s", got)
+	}
+}
+
 func TestNormalizeMessages_ToolProtocolInSystemPrompt(t *testing.T) {
 	tools := []ToolDef{
 		{Function: ToolFunctionDef{Name: "terminal", Description: "Run shell command", Parameters: map[string]interface{}{"command": "string"}}},
