@@ -197,7 +197,7 @@ func logRequest(e LogEntry) {
 		stream = 1
 	}
 	_, err := db.Exec(`INSERT INTO request_logs(ts,pat,model,stream,prompt_tokens,completion_tokens,total_tokens,credits,status,error,latency_ms,client_ip,api_key)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		time.Now().Unix(), e.PAT, e.Model, stream,
 		e.PromptTokens, e.CompletionTokens, e.TotalTokens, e.Credits,
 		e.Status, e.Error, e.LatencyMs, e.ClientIP, e.APIKey)

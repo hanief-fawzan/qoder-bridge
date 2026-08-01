@@ -584,9 +584,9 @@ func handleStream(w http.ResponseWriter, r *http.Request, req ChatRequest, model
 	} else if result != nil && len(result.ToolCalls) > 0 {
 		// Emit tool_calls as OpenAI-compatible chunk
 		if flusher != nil {
-			for _, tc := range result.ToolCalls {
+			for i, tc := range result.ToolCalls {
 				tcDelta, _ := json.Marshal(map[string]interface{}{
-					"index": 0,
+					"index": i,
 					"id":    tc.ID,
 					"type":  "function",
 					"function": map[string]interface{}{
@@ -727,9 +727,9 @@ func handleBufferedStream(w http.ResponseWriter, r *http.Request, req ChatReques
 			})
 		}
 		// Send each tool_call as a chunk
-		for _, tc := range result.ToolCalls {
+		for i, tc := range result.ToolCalls {
 			tcDelta, _ := json.Marshal(map[string]interface{}{
-				"index": 0,
+				"index": i,
 				"id":    tc.ID,
 				"type":  "function",
 				"function": map[string]interface{}{
@@ -884,9 +884,9 @@ comboRounds:
 							})
 							roleSent = true
 						}
-						for _, tc := range result.ToolCalls {
+						for i, tc := range result.ToolCalls {
 							tcDelta, _ := json.Marshal(map[string]interface{}{
-								"index": 0, "id": tc.ID, "type": "function",
+								"index": i, "id": tc.ID, "type": "function",
 								"function": map[string]interface{}{
 									"name": tc.Function.Name, "arguments": tc.Function.Arguments,
 								},
@@ -1036,9 +1036,9 @@ func emitBufferedComboSSE(w http.ResponseWriter, flusher http.Flusher, id string
 				Choices: []SSEChoice{{Index: 0, Delta: json.RawMessage(`{"content":` + mustQuote(text) + `}`)}},
 			})
 		}
-		for _, tc := range result.ToolCalls {
+		for i, tc := range result.ToolCalls {
 			tcDelta, _ := json.Marshal(map[string]interface{}{
-				"index": 0, "id": tc.ID, "type": "function",
+				"index": i, "id": tc.ID, "type": "function",
 				"function": map[string]interface{}{
 					"name": tc.Function.Name, "arguments": tc.Function.Arguments,
 				},
