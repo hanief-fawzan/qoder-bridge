@@ -699,3 +699,205 @@ func TestNormalizeMessagesToolsInSystemPrompt(t *testing.T) {
 		t.Error("system prompt should contain NEVER describe instruction")
 	}
 }
+
+// ── Tool Calling E2E Tests ────────────────────────────────────────────────
+
+func TestParseToolCallsFromText_DelegateTask(t *testing.T) {
+	input := "I'll delegate this to a subagent.\n\n" + "```" + `json
+{"tool_calls": [{"name": "delegate_task", "arguments": {"goal": "Search for recent papers about LLM agents", "role": "leaf", "tasks": [{"goal": "Search arxiv", "context": "Focus on 2024-2025 papers"}]}}]}
+` + "```"
+	calls, cleanText := parseToolCallsFromText(input)
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 tool call, got %d", len(calls))
+	}
+	tc := calls[0]
+	if tc.Function.Name != "delegate_task" {
+		t.Errorf("expected delegate_task, got %s", tc.Function.Name)
+	}
+	var args map[string]interface{}
+	if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
+		t.Fatalf("failed to parse arguments: %v", err)
+	}
+	if args["goal"] == nil {
+		t.Error("missing 'goal' in arguments")
+	}
+	if args["tasks"] == nil {
+		t.Error("missing 'tasks' in arguments")
+	}
+	if !strings.Contains(cleanText, "delegate") {
+		t.Error("clean text should preserve prefix")
+	}
+}
+
+func TestParseToolCallsFromText_Terminal(t *testing.T) {
+	input := "Let me check that.\n\n" + "```" + `json
+{"tool_calls": [{"name": "terminal", "arguments": {"command": "go test -v ./..."}}]}
+` + "```"
+	calls, _ := parseToolCallsFromText(input)
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 tool call, got %d", len(calls))
+	}
+	if calls[0].Function.Name != "terminal" {
+		t.Errorf("expected terminal, got %s", calls[0].Function.Name)
+	}
+	var args map[string]interface{}
+	json.Unmarshal([]byte(calls[0].Function.Arguments), &args)
+	if args["command"] != "go test -v ./..." {
+		t.Errorf("wrong command: %v", args["command"])
+	}
+}
+
+func TestParseToolCallsFromText_ReadFile(t *testing.T) {
+	input := "```" + `json
+{"tool_calls": [{"name": "read_file", "arguments": {"path": "/home/ideagi/projects/qoder-bridge/main.go", "offset": 100, "limit": 50}}]}
+` + "```"
+	calls, _ := parseToolCallsFromText(input)
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 tool call, got %d", len(calls))
+	}
+	if calls[0].Function.Name != "read_file" {
+		t.Errorf("expected read_file, got %s", calls[0].Function.Name)
+	}
+}
+
+func TestParseToolCallsFromText_SkillManage(t *testing.T) {
+	input := "```" + `json
+{"tool_calls": [{"name": "skill_manage", "arguments": {"action": "create", "name": "my-skill", "content": "---\nname: my-skill\n---\n# Skill"}}]}
+` + "```"
+	calls, _ := parseToolCallsFromText(input)
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 tool call, got %d", len(calls))
+	}
+	if calls[0].Function.Name != "skill_manage" {
+		t.Errorf("expected skill_manage, got %s", calls[0].Function.Name)
+	}
+}
+
+func TestParseToolCallsFromText_MultipleTools(t *testing.T) {
+	input := "I'll read the file and then search for patterns.\n\n" + "```" + `json
+{"tool_calls": [{"name": "read_file", "arguments": {"path": "/tmp/test.go"}}, {"name": "search_files", "arguments": {"pattern": "func main", "path": "/tmp"}}]}
+` + "```"
+	calls, _ := parseToolCallsFromText(input)
+	if len(calls) != 2 {
+		t.Fatalf("expected 2 tool calls, got %d", len(calls))
+	}
+	if calls[0].Function.Name != "read_file" {
+		t.Errorf("first call should be read_file, got %s", calls[0].Function.Name)
+	}
+	if calls[1].Function.Name != "search_files" {
+		t.Errorf("second call should be search_files, got %s", calls[1].Function.Name)
+	}
+}
+
+func TestParseToolCallsFromText_BareJsonNoFence(t *testing.T) {
+	// Model sometimes outputs JSON without ``` fences
+	input := `{"tool_calls": [{"name": "terminal", "arguments": {"command": "ls -la"}}]}`
+	calls, _ := parseToolCallsFromText(input)
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 tool call from bare JSON, got %d", len(calls))
+	}
+	if calls[0].Function.Name != "terminal" {
+		t.Errorf("expected terminal, got %s", calls[0].Function.Name)
+	}
+}
+
+func TestParseToolCallsFromText_PatchFile(t *testing.T) {
+	// Use single-line arguments to avoid backtick raw string issues
+	input := "```" + `json
+{"tool_calls": [{"name": "patch", "arguments": {"mode": "replace", "path": "/tmp/test.go", "old_string": "func main()", "new_string": "func main() { return 42 }"}}]}
+` + "```"
+	calls, _ := parseToolCallsFromText(input)
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 tool call, got %d", len(calls))
+	}
+	if calls[0].Function.Name != "patch" {
+		t.Errorf("expected patch, got %s", calls[0].Function.Name)
+	}
+	var args map[string]interface{}
+	json.Unmarshal([]byte(calls[0].Function.Arguments), &args)
+	newStr, _ := args["new_string"].(string)
+	if !strings.Contains(newStr, "return 42") {
+		t.Errorf("patch new_string should contain 'return 42', got %q", newStr)
+	}
+}
+
+func TestParseToolCallsFromText_BrowserNavigate(t *testing.T) {
+	input := "```" + `json
+{"tool_calls": [{"name": "browser_navigate", "arguments": {"url": "https://example.com"}}]}
+` + "```"
+	calls, _ := parseToolCallsFromText(input)
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 tool call, got %d", len(calls))
+	}
+	if calls[0].Function.Name != "browser_navigate" {
+		t.Errorf("expected browser_navigate, got %s", calls[0].Function.Name)
+	}
+}
+
+func TestParseToolCallsFromText_TextPrefixCleaned(t *testing.T) {
+	input := "Let me analyze the code first.\n\n" + "```" + `json
+{"tool_calls": [{"name": "read_file", "arguments": {"path": "/tmp/test.go"}}]}
+` + "```"
+	calls, cleanText := parseToolCallsFromText(input)
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 call, got %d", len(calls))
+	}
+	if !strings.Contains(cleanText, "analyze") {
+		t.Error("clean text should preserve prefix text about analysis")
+	}
+	if strings.Contains(cleanText, "read_file") {
+		t.Error("clean text should NOT contain tool call JSON")
+	}
+}
+
+func TestNormalizeMessages_PreservesToolResultChain(t *testing.T) {
+	msgs := []ChatMessage{
+		{Role: "user", Content: "read file foo.txt"},
+		{Role: "assistant", Content: "", Extra: map[string]interface{}{
+			"tool_calls": []interface{}{
+				map[string]interface{}{"id": "call_abc123", "function": map[string]interface{}{"name": "read_file", "arguments": `{"path":"foo.txt"}`}},
+			},
+		}},
+		{Role: "tool", Content: "file content here", Extra: map[string]interface{}{
+			"tool_call_id": "call_abc123",
+		}},
+	}
+	out, _ := normalizeMessages(msgs, nil)
+	if len(out) != 3 {
+		t.Fatalf("expected 3 messages (user, assistant+tool, tool-result), got %d", len(out))
+	}
+	// Check assistant has tool_calls in ```json format
+	aMsg, ok := out[1].Content.(string)
+	if !ok {
+		t.Fatal("assistant content should be string")
+	}
+	if !strings.Contains(aMsg, "read_file") {
+		t.Error("assistant msg should contain tool call name")
+	}
+	if !strings.Contains(aMsg, "```json") {
+		t.Error("assistant msg should have ```json fence")
+	}
+}
+
+func TestNormalizeMessages_ToolProtocolInSystemPrompt(t *testing.T) {
+	tools := []ToolDef{
+		{Function: ToolFunctionDef{Name: "terminal", Description: "Run shell command", Parameters: map[string]interface{}{"command": "string"}}},
+		{Function: ToolFunctionDef{Name: "read_file", Description: "Read file", Parameters: map[string]interface{}{"path": "string"}}},
+		{Function: ToolFunctionDef{Name: "delegate_task", Description: "Delegate to subagent", Parameters: map[string]interface{}{"goal": "string"}}},
+	}
+	msgs := []ChatMessage{{Role: "user", Content: "test"}}
+	_, system := normalizeMessages(msgs, tools)
+	// Check all tools mentioned
+	for _, name := range []string{"terminal", "read_file", "delegate_task"} {
+		if !strings.Contains(system, name) {
+			t.Errorf("system prompt should mention tool: %s", name)
+		}
+	}
+	// Check examples present
+	if !strings.Contains(system, "read_file") {
+		t.Error("should have read_file example")
+	}
+	if !strings.Contains(system, "terminal") {
+		t.Error("should have terminal example")
+	}
+}
