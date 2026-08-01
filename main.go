@@ -284,52 +284,97 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 
 // handleStatus returns diagnostics: proxy egress IP, DB info, PAT pool status, uptime.
 // This helps debug whether MicroWARP/proxy is working and DB is logging.
+
+type patInfo struct {
+	PAT       string `json:"pat"`
+	Available bool   `json:"available"`
+	Cooldown  string `json:"cooldown,omitempty"`
+}
+
+type StatusResponse struct {
+	Uptime      string    `json:"uptime"`
+	Engine      string    `json:"engine"`
+	Proxy       string    `json:"proxy"`
+	ProxyCount  int       `json:"proxy_count"`
+	EgressIP    string    `json:"egress_ip"`
+	DBPath      string    `json:"db_path"`
+	DBWorking   bool      `json:"db_working"`
+	DBSize      string    `json:"db_size"`
+	LogCount    int64     `json:"log_count"`
+	PATStrategy string    `json:"pat_strategy"`
+	PATCount    int       `json:"pat_count"`
+	PATs        []patInfo `json:"pats"`
+	Combos      []string  `json:"combos"`
+}
+
+// Egress IP cached for 5 minutes — checking api.ipify.org on every
+// /v1/status request adds 200-500ms latency for no fresh data. The
+// proxy pool itself is the only thing that can change the egress IP
+// and that's user-driven (config save), so we explicitly invalidate.
+var (
+	egressIPMu  sync.RWMutex
+	egressIPVal string
+	egressIPExp time.Time
+)
+
+func fetchEgressIP(client *http.Client) string {
+	egressIPMu.RLock()
+	if time.Now().Before(egressIPExp) && egressIPVal != "" {
+		v := egressIPVal
+		egressIPMu.RUnlock()
+		return v
+	}
+	egressIPMu.RUnlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, "GET", "https://api.ipify.org?format=text", nil)
+	if resp, err := client.Do(req); err == nil {
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		ip := strings.TrimSpace(string(body))
+		egressIPMu.Lock()
+		egressIPVal = ip
+		egressIPExp = time.Now().Add(5 * time.Minute)
+		egressIPMu.Unlock()
+		return ip
+	} else {
+		// Stale-on-error: if we have a previous value, keep it but tag
+		// the failure so the user can see something is wrong.
+		egressIPMu.RLock()
+		stale := egressIPVal
+		egressIPMu.RUnlock()
+		if stale != "" {
+			return stale + " (stale: " + err.Error() + ")"
+		}
+		return "check failed: " + err.Error()
+	}
+}
+
+func invalidateEgressCache() {
+	egressIPMu.Lock()
+	egressIPExp = time.Time{}
+	egressIPMu.Unlock()
+}
+
 func handleStatus(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
-	type patInfo struct {
-		PAT       string `json:"pat"`
-		Available bool   `json:"available"`
-		Cooldown  string `json:"cooldown,omitempty"`
-	}
-
-	type statusResp struct {
-		Uptime       string   `json:"uptime"`
-		Proxy        string   `json:"proxy"`
-		ProxyCount   int      `json:"proxy_count"`
-		EgressIP     string   `json:"egress_ip"`
-		DBPath       string   `json:"db_path"`
-		DBWorking    bool     `json:"db_working"`
-		DBSize       string   `json:"db_size"`
-		LogCount     int64    `json:"log_count"`
-		PATStrategy  string   `json:"pat_strategy"`
-		PATCount     int      `json:"pat_count"`
-		PATs         []patInfo `json:"pats"`
-		Combos       []string `json:"combos"`
-	}
-
-	resp := statusResp{
+	pats := patPool.All()
+	resp := StatusResponse{
 		Uptime:      time.Since(startTime).Round(time.Second).String(),
-		Proxy:       getProxyInfo(),
-		ProxyCount:  proxyCount(),
+		Engine:      "pure Go COSY",
 		DBPath:      dbLocation(),
 		DBWorking:   db != nil,
 		PATStrategy: patPool.strategy,
 		PATCount:    len(pats),
+		Proxy:       getProxyInfo(),
+		ProxyCount:  proxyCount(),
 	}
 
-	// Egress IP check (5s timeout, uses proxy pool)
+	// Egress IP — cached for 5 minutes (see fetchEgressIP).
 	if client := proxyClientFn(); client != nil {
-		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
-		req, _ := http.NewRequestWithContext(ctx, "GET", "https://api.ipify.org?format=text", nil)
-		if resp2, err := client.Do(req); err == nil {
-			body, _ := io.ReadAll(resp2.Body)
-			resp2.Body.Close()
-			resp.EgressIP = strings.TrimSpace(string(body))
-		} else {
-			resp.EgressIP = "check failed: " + err.Error()
-		}
-		cancel()
+		resp.EgressIP = fetchEgressIP(client)
 	}
 
 	// DB stats
@@ -532,10 +577,16 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Buffer body so we can decode twice (ChatRequest + raw extra fields)
+	// Buffer body so we can decode twice (ChatRequest + raw extra fields).
+	// 10MB cap matches typical OpenAI proxies; beyond that we surface a
+	// 413 instead of silently truncating (previous behavior).
 	bodyBytes, err := io.ReadAll(io.LimitReader(r.Body, 10<<20))
 	if err != nil {
 		sendJSONError(w, 400, "failed to read body")
+		return
+	}
+	if int64(len(bodyBytes)) == 10<<20 {
+		sendJSONError(w, 413, "request body exceeds 10MB limit")
 		return
 	}
 
@@ -640,13 +691,19 @@ func handleStream(w http.ResponseWriter, r *http.Request, req ChatRequest, model
 
 	if err != nil {
 		log.Printf("stream error: %v", err)
-		errMsg := "\n\n[Error: " + err.Error() + "]"
+		// Emit error as a proper finish_reason chunk (not a content chunk
+		// — putting errors in `content` causes Hermes/Claude to confuse
+		// them with model output).
 		if flusher != nil {
+			errReason := "error"
 			sendSSE(w, flusher, SSEChunk{
 				ID: id, Object: "chat.completion.chunk", Created: created, Model: req.Model,
-				Choices: []SSEChoice{{Index: 0, Delta: json.RawMessage(`{"content":` + mustQuote(errMsg) + `}`)}},
+				Choices: []SSEChoice{{Index: 0, Delta: json.RawMessage(`{}`), FinishReason: &errReason}},
 			})
+			fmt.Fprintf(w, "data: [DONE]\n\n")
+			flusher.Flush()
 		}
+		return
 	} else if result != nil && len(result.ToolCalls) > 0 {
 		// Emit tool_calls as OpenAI-compatible chunk
 		if flusher != nil {
@@ -746,20 +803,14 @@ func handleBufferedStream(w http.ResponseWriter, r *http.Request, req ChatReques
 
 	if err != nil {
 		log.Printf("buffered stream error: %v", err)
-		errMsg := "[Error: " + err.Error() + "]"
+		// Emit error as a single finish_reason="error" chunk — putting
+		// the error into `content` makes Hermes/Claude interpret it as
+		// model output rather than a transport failure.
 		if flusher != nil {
+			errReason := "error"
 			sendSSE(w, flusher, SSEChunk{
 				ID: id, Object: "chat.completion.chunk", Created: created, Model: req.Model,
-				Choices: []SSEChoice{{Index: 0, Delta: json.RawMessage(`{"role":"assistant","content":""}`)}},
-			})
-			sendSSE(w, flusher, SSEChunk{
-				ID: id, Object: "chat.completion.chunk", Created: created, Model: req.Model,
-				Choices: []SSEChoice{{Index: 0, Delta: json.RawMessage(`{"content":` + mustQuote(errMsg) + `}`)}},
-			})
-			stop := "stop"
-			sendSSE(w, flusher, SSEChunk{
-				ID: id, Object: "chat.completion.chunk", Created: created, Model: req.Model,
-				Choices: []SSEChoice{{Index: 0, Delta: json.RawMessage(`{}`), FinishReason: &stop}},
+				Choices: []SSEChoice{{Index: 0, Delta: json.RawMessage(`{}`), FinishReason: &errReason}},
 			})
 			fmt.Fprintf(w, "data: [DONE]\n\n")
 			flusher.Flush()
@@ -1319,12 +1370,19 @@ func isQueueError(err error) bool {
 }
 
 // isRetryableError returns true if trying a different PAT might succeed.
+// Plain 401 is NOT retryable — the credential is bad, not exhausted.
+// Other PATs can't recover an expired/invalid token.
 func isRetryableError(err error) bool {
-	if isPricingError(err) {
-		return true // this PAT's quota exhausted — next PAT might work
+	if ue, ok := err.(*UpstreamError); ok {
+		if ue.StatusCode == 401 {
+			return false // auth error: rotating won't help
+		}
 	}
-	if isAuthError(err) || isQueueError(err) {
-		return true
+	if isPricingError(err) {
+		return true // quota exhausted — next PAT may have remaining
+	}
+	if isQueueError(err) {
+		return true // queue backpressure — different PAT may not be queued
 	}
 	if ue, ok := err.(*UpstreamError); ok {
 		return ue.StatusCode == 429 || ue.StatusCode >= 500

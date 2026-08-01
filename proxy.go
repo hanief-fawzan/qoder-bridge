@@ -163,11 +163,29 @@ func buildSocks5Client(u *url.URL) (*http.Client, string) {
 	}
 
 	t := streamingTransport()
+	// Honor ctx cancellation even when the SOCKS5 dialer doesn't
+	// expose DialContext. proxy.Direct has no timeout and a stalled
+	// handshake can otherwise pin a goroutine past client disconnect.
+	cd, _ := dialer.(contextDialer)
 	t.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-		if cd, ok := dialer.(contextDialer); ok {
+		if cd != nil {
 			return cd.DialContext(ctx, network, addr)
 		}
-		return dialer.Dial(network, addr)
+		type dialResult struct {
+			c   net.Conn
+			err error
+		}
+		ch := make(chan dialResult, 1)
+		go func() {
+			c, err := dialer.Dial(network, addr)
+			ch <- dialResult{c, err}
+		}()
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case r := <-ch:
+			return r.c, r.err
+		}
 	}
 	return &http.Client{Transport: t}, label
 }

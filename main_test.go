@@ -128,7 +128,8 @@ func TestIsRetryableError(t *testing.T) {
 		want bool
 	}{
 		{"pricing 112", &UpstreamError{StatusCode: 403, Body: `{"code":"112"}`}, true},
-		{"auth 401", &UpstreamError{StatusCode: 401}, true},
+		{"auth 401", &UpstreamError{StatusCode: 401}, false}, // bad token — rotating won't help
+		{"auth 403 non-pricing", &UpstreamError{StatusCode: 403, Body: `{"error":"forbidden"}`}, false},
 		{"queue", &UpstreamError{StatusCode: 403, Body: `{"isQueued":true}`}, true},
 		{"rate limit", &UpstreamError{StatusCode: 429}, true},
 		{"server error", &UpstreamError{StatusCode: 500}, true},
