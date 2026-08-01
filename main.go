@@ -232,16 +232,16 @@ type ChatResponse struct {
 }
 
 type Choice struct {
-	Index        int         `json:"index"`
-	Message      *Message    `json:"message,omitempty"`
-	Delta        *Message    `json:"delta,omitempty"`
-	FinishReason string      `json:"finish_reason,omitempty"`
-	ToolCalls    []ToolCall  `json:"tool_calls,omitempty"`
+	Index        int      `json:"index"`
+	Message      *Message `json:"message,omitempty"`
+	Delta        *Message `json:"delta,omitempty"`
+	FinishReason string   `json:"finish_reason,omitempty"`
 }
 
 type Message struct {
-	Role    string      `json:"role"`
-	Content interface{} `json:"content"`
+	Role      string      `json:"role"`
+	Content   interface{} `json:"content"`
+	ToolCalls []ToolCall  `json:"tool_calls,omitempty"`
 }
 
 type Usage struct {
@@ -426,8 +426,10 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 
 	// Check if this is a combo request
 	if comboModels, isCombo := resolveCombo(modelInput); isCombo {
-		if req.Stream {
+		if req.Stream && len(req.Tools) == 0 {
 			handleComboStream(w, r, req, modelInput, comboModels)
+		} else if req.Stream {
+			handleBufferedComboStream(w, r, req, modelInput, comboModels)
 		} else {
 			handleComboNonStream(w, r, req, modelInput, comboModels)
 		}
@@ -534,10 +536,7 @@ func handleNonStream(w http.ResponseWriter, r *http.Request, req ChatRequest, mo
 	choices := []Choice{{Index: 0, Message: &Message{Role: "assistant", Content: text}, FinishReason: "stop"}}
 	if result != nil && len(result.ToolCalls) > 0 {
 		// Return tool_calls in OpenAI format
-		choices = []Choice{{Index: 0, Message: &Message{Role: "assistant", Content: text}, FinishReason: "tool_calls"}}
-		for i := range result.ToolCalls {
-			choices[0].ToolCalls = append(choices[0].ToolCalls, result.ToolCalls[i])
-		}
+		choices = []Choice{{Index: 0, Message: &Message{Role: "assistant", Content: text, ToolCalls: result.ToolCalls}, FinishReason: "tool_calls"}}
 	}
 
 	resp := ChatResponse{
@@ -677,8 +676,7 @@ func handleComboNonStream(w http.ResponseWriter, r *http.Request, req ChatReques
 				}
 				choices := []Choice{{Index: 0, Message: &Message{Role: "assistant", Content: text}, FinishReason: "stop"}}
 				if result != nil && len(result.ToolCalls) > 0 {
-					choices = []Choice{{Index: 0, Message: &Message{Role: "assistant", Content: text}, FinishReason: "tool_calls"}}
-					choices[0].ToolCalls = result.ToolCalls
+					choices = []Choice{{Index: 0, Message: &Message{Role: "assistant", Content: text, ToolCalls: result.ToolCalls}, FinishReason: "tool_calls"}}
 				}
 				resp := ChatResponse{
 					ID:      "chatcmpl-" + uuidString(),
@@ -823,6 +821,126 @@ comboRounds:
 		fmt.Fprintf(w, "data: [DONE]\n\n")
 		flusher.Flush()
 	}
+}
+
+// handleBufferedComboStream buffers the full response for each combo model,
+// parses tool_calls from text, then emits clean SSE chunks. Used when
+// stream=true and tools are present, so raw ```json tool-call blocks don't leak.
+func handleBufferedComboStream(w http.ResponseWriter, r *http.Request, req ChatRequest, comboName string, modelList []string) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	flusher, _ := w.(http.Flusher)
+	id := "chatcmpl-" + uuidString()
+	created := time.Now().Unix()
+
+	const maxRounds = 3
+	var lastErr error
+	for round := 0; round < maxRounds; round++ {
+		for _, model := range modelList {
+			modelKey := resolveModelKey(model)
+			if !knownModelKeys[modelKey] {
+				log.Printf("combo %q: model %q not in known list, trying anyway", comboName, model)
+			}
+			log.Printf("combo %q: round %d, trying qd/%s", comboName, round+1, modelKey)
+
+			// Buffer: no streaming callback
+			result, err := runWithPATRotation(r.Context(), patPool, modelKey, req.Messages, req.MaxTokens, nil, req.Tools, req.ThinkingEffort, req.ContextWindow)
+			if err == nil {
+				emitBufferedComboSSE(w, flusher, id, created, comboName, result)
+				return
+			}
+			lastErr = err
+			log.Printf("combo %q: qd/%s failed: %v", comboName, modelKey, err)
+			if isPricingError(err) {
+				log.Printf("combo %q: qd/%s PAT quota exhausted (code 112), PAT rotated", comboName, modelKey)
+			}
+		}
+		if round+1 < maxRounds {
+			log.Printf("combo %q: round %d complete, all models failed, starting round %d", comboName, round+1, round+2)
+		}
+	}
+
+	// All models failed across all rounds
+	if flusher != nil {
+		errMsg := fmt.Sprintf("[Error: combo %s: all %d rounds exhausted, last: %s]", comboName, maxRounds, lastErr)
+		sendSSE(w, flusher, SSEChunk{
+			ID: id, Object: "chat.completion.chunk", Created: created, Model: comboName,
+			Choices: []SSEChoice{{Index: 0, Delta: json.RawMessage(`{"role":"assistant","content":""}`)}},
+		})
+		sendSSE(w, flusher, SSEChunk{
+			ID: id, Object: "chat.completion.chunk", Created: created, Model: comboName,
+			Choices: []SSEChoice{{Index: 0, Delta: json.RawMessage(`{"content":` + mustQuote(errMsg) + `}`)}},
+		})
+		stop := "stop"
+		sendSSE(w, flusher, SSEChunk{
+			ID: id, Object: "chat.completion.chunk", Created: created, Model: comboName,
+			Choices: []SSEChoice{{Index: 0, Delta: json.RawMessage(`{}`), FinishReason: &stop}},
+		})
+		fmt.Fprintf(w, "data: [DONE]\n\n")
+		flusher.Flush()
+	}
+}
+
+// emitBufferedComboSSE emits a buffered combo response as OpenAI-compatible SSE.
+func emitBufferedComboSSE(w http.ResponseWriter, flusher http.Flusher, id string, created int64, comboName string, result *ChatResult) {
+	if flusher == nil {
+		return
+	}
+
+	sendSSE(w, flusher, SSEChunk{
+		ID: id, Object: "chat.completion.chunk", Created: created, Model: comboName,
+		Choices: []SSEChoice{{Index: 0, Delta: json.RawMessage(`{"role":"assistant","content":""}`)}},
+	})
+
+	text := ""
+	if result != nil {
+		text = result.Text
+	}
+
+	hasToolCalls := result != nil && len(result.ToolCalls) > 0
+
+	if hasToolCalls {
+		if strings.TrimSpace(text) != "" {
+			sendSSE(w, flusher, SSEChunk{
+				ID: id, Object: "chat.completion.chunk", Created: created, Model: comboName,
+				Choices: []SSEChoice{{Index: 0, Delta: json.RawMessage(`{"content":` + mustQuote(text) + `}`)}},
+			})
+		}
+		for _, tc := range result.ToolCalls {
+			tcDelta, _ := json.Marshal(map[string]interface{}{
+				"index": 0, "id": tc.ID, "type": "function",
+				"function": map[string]interface{}{
+					"name": tc.Function.Name, "arguments": tc.Function.Arguments,
+				},
+			})
+			sendSSE(w, flusher, SSEChunk{
+				ID: id, Object: "chat.completion.chunk", Created: created, Model: comboName,
+				Choices: []SSEChoice{{Index: 0, Delta: json.RawMessage(`{"tool_calls":[` + string(tcDelta) + `]}`)}},
+			})
+		}
+		reason := "tool_calls"
+		sendSSE(w, flusher, SSEChunk{
+			ID: id, Object: "chat.completion.chunk", Created: created, Model: comboName,
+			Choices: []SSEChoice{{Index: 0, Delta: json.RawMessage(`{}`), FinishReason: &reason}},
+		})
+	} else {
+		if text != "" {
+			sendSSE(w, flusher, SSEChunk{
+				ID: id, Object: "chat.completion.chunk", Created: created, Model: comboName,
+				Choices: []SSEChoice{{Index: 0, Delta: json.RawMessage(`{"content":` + mustQuote(text) + `}`)}},
+			})
+		}
+		stop := "stop"
+		sendSSE(w, flusher, SSEChunk{
+			ID: id, Object: "chat.completion.chunk", Created: created, Model: comboName,
+			Choices: []SSEChoice{{Index: 0, Delta: json.RawMessage(`{}`), FinishReason: &stop}},
+		})
+	}
+
+	fmt.Fprintf(w, "data: [DONE]\n\n")
+	flusher.Flush()
 }
 
 func handleQuota(w http.ResponseWriter, r *http.Request) {

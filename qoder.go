@@ -439,13 +439,15 @@ func normalizeMessages(messages []ChatMessage, tools []ToolDef) ([]ChatMessage, 
 
 %s
 
-To call a tool, respond with a JSON code block ONLY:
+When you need to call a tool, use ONE of these output formats:
+
 ` + "```" + `json
 {"tool_calls": [{"name": "tool_name", "arguments": {}}]}
 ` + "```" + `
 
-If no tool is needed, respond with normal text. Do NOT output both text and tool calls.
-如需调用工具，仅输出以上 JSON 代码块。如不需要，直接回复文本。`, string(toolJSON))
+Or include your reasoning as normal text, then the JSON block.
+If no tool is needed, respond with normal text.
+如需调用工具，请使用以上 JSON 代码块格式。如不需要，直接回复文本。`, string(toolJSON))
 		systemParts = append([]string{toolPrompt}, systemParts...)
 	}
 

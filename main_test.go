@@ -635,6 +635,45 @@ func TestNormalizeMessagesAssistantWithToolCalls(t *testing.T) {
 	}
 }
 
+func TestToolCallsInMessageNotChoice(t *testing.T) {
+	// Hermes (and OpenAI clients) expect tool_calls inside message, not choice.
+	input := `Here is the result.
+
+` + "```" + `json
+{"tool_calls": [{"name": "web_search", "arguments": {"query": "qoder bridge"}}]}
+` + "```"
+
+	calls, cleanText := parseToolCallsFromText(input)
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 call, got %d", len(calls))
+	}
+
+	// Simulate building a non-stream response
+	choices := []Choice{{Index: 0, Message: &Message{Role: "assistant", Content: cleanText, ToolCalls: calls}, FinishReason: "tool_calls"}}
+	resp := ChatResponse{
+		ID: "chatcmpl-test", Object: "chat.completion", Created: 1, Model: "qd/test",
+		Choices: choices,
+	}
+	b, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var parsed map[string]interface{}
+	json.Unmarshal(b, &parsed)
+	choices0 := parsed["choices"].([]interface{})[0].(map[string]interface{})
+	if _, ok := choices0["tool_calls"]; ok {
+		t.Error("tool_calls MUST NOT be at choice level")
+	}
+	msg := choices0["message"].(map[string]interface{})
+	if _, ok := msg["tool_calls"]; !ok {
+		t.Errorf("tool_calls MUST be inside message, got response: %s", string(b))
+	}
+	if msg["tool_calls"].([]interface{})[0].(map[string]interface{})["function"].(map[string]interface{})["name"] != "web_search" {
+		t.Error("tool call function name wrong")
+	}
+}
+
 func TestNormalizeMessagesToolsInSystemPrompt(t *testing.T) {
 	tools := []ToolDef{
 		{Function: ToolFunctionDef{Name: "read_file", Description: "Read a file", Parameters: map[string]interface{}{"path": "string"}}},
