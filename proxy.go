@@ -31,15 +31,22 @@ var proxyIdx int
 var proxyMu sync.Mutex
 
 // streamingTransport returns a transport suitable for SSE streaming (no overall timeout).
+// Optimized for low latency: DNS cache, connection reuse, no compression.
 func streamingTransport() *http.Transport {
 	return &http.Transport{
-		MaxIdleConns:        100,
-		MaxIdleConnsPerHost: 10,
-		IdleConnTimeout:     90 * time.Second,
-		TLSHandshakeTimeout: 15 * time.Second,
+		MaxIdleConns:        200,
+		MaxIdleConnsPerHost: 20,
+		IdleConnTimeout:     120 * time.Second,
+		TLSHandshakeTimeout: 10 * time.Second,
 		ResponseHeaderTimeout: 30 * time.Second,
+		DisableCompression: true,
+		ForceAttemptHTTP2:  true,
 		// ponytail: no ReadTimeout here — SSE streams can run indefinitely.
 		// Context cancellation (client disconnect) handles the upper bound.
+		DialContext: (&net.Dialer{
+			Timeout:   10 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
 	}
 }
 

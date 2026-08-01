@@ -85,6 +85,18 @@ func migrate(d *sql.DB) error {
 			value TEXT NOT NULL
 		)`,
 
+		// API keys table: support multiple named sk-* keys.
+		`CREATE TABLE IF NOT EXISTS api_keys (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			name TEXT NOT NULL,
+			api_key TEXT NOT NULL UNIQUE,
+			enabled INTEGER DEFAULT 1,
+			created_at INTEGER NOT NULL
+		)`,
+
+		// Add api_key column to logs for per-key usage
+		`ALTER TABLE request_logs ADD COLUMN api_key TEXT DEFAULT ''`,
+
 		// DB size guard: we aim for <100MB
 		`PRAGMA auto_vacuum=INCREMENTAL`,
 	}
@@ -167,6 +179,7 @@ type LogEntry struct {
 	Error            string
 	LatencyMs        int64
 	ClientIP         string
+	APIKey           string
 }
 
 // logRequest inserts a request log entry into the DB.
@@ -178,11 +191,11 @@ func logRequest(e LogEntry) {
 	if e.Stream {
 		stream = 1
 	}
-	_, err := db.Exec(`INSERT INTO request_logs(ts,pat,model,stream,prompt_tokens,completion_tokens,total_tokens,credits,status,error,latency_ms,client_ip)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+	_, err := db.Exec(`INSERT INTO request_logs(ts,pat,model,stream,prompt_tokens,completion_tokens,total_tokens,credits,status,error,latency_ms,client_ip,api_key)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		time.Now().Unix(), e.PAT, e.Model, stream,
 		e.PromptTokens, e.CompletionTokens, e.TotalTokens, e.Credits,
-		e.Status, e.Error, e.LatencyMs, e.ClientIP)
+		e.Status, e.Error, e.LatencyMs, e.ClientIP, e.APIKey)
 	if err != nil {
 		log.Printf("db: failed to log request: %v", err)
 	}
@@ -191,7 +204,7 @@ func logRequest(e LogEntry) {
 // ── Usage queries ───────────────────────────────────────────────────────────
 
 type UsageRow struct {
-	PAT       string
+	Group     string // PAT or API key, depending on query type
 	Model     string
 	Requests  int
 	Tokens    int
@@ -200,7 +213,8 @@ type UsageRow struct {
 	LastTS    int64
 }
 
-func queryUsage(fromTS, toTS int64) ([]UsageRow, error) {
+// queryUsageByPAT groups usage by PAT + model.
+func queryUsageByPAT(fromTS, toTS int64) ([]UsageRow, error) {
 	if db == nil {
 		return nil, fmt.Errorf("db not initialized")
 	}
@@ -214,16 +228,148 @@ func queryUsage(fromTS, toTS int64) ([]UsageRow, error) {
 		return nil, err
 	}
 	defer rows.Close()
-
 	var out []UsageRow
 	for rows.Next() {
 		var r UsageRow
-		if err := rows.Scan(&r.PAT, &r.Model, &r.Requests, &r.Tokens, &r.Credits, &r.FirstTS, &r.LastTS); err != nil {
+		if err := rows.Scan(&r.Group, &r.Model, &r.Requests, &r.Tokens, &r.Credits, &r.FirstTS, &r.LastTS); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
 	}
 	return out, nil
+}
+
+// queryUsageByAPIKey groups usage by API key + model.
+func queryUsageByAPIKey(fromTS, toTS int64) ([]UsageRow, error) {
+	if db == nil {
+		return nil, fmt.Errorf("db not initialized")
+	}
+	rows, err := db.Query(`
+		SELECT COALESCE(api_key,'(no key)'), model, COUNT(*), SUM(total_tokens), SUM(credits), MIN(ts), MAX(ts)
+		FROM request_logs
+		WHERE ts >= ? AND ts <= ?
+		GROUP BY api_key, model
+		ORDER BY api_key, model`, fromTS, toTS)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []UsageRow
+	for rows.Next() {
+		var r UsageRow
+		if err := rows.Scan(&r.Group, &r.Model, &r.Requests, &r.Tokens, &r.Credits, &r.FirstTS, &r.LastTS); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, nil
+}
+
+// queryUsageSummary returns overall totals for a period.
+type UsageSummary struct {
+	TotalRequests  int
+	TotalTokens   int
+	TotalCredits  float64
+	AvgLatencyMs  int64
+	ErrorCount    int
+}
+
+func queryUsageSummary(fromTS, toTS int64) (*UsageSummary, error) {
+	if db == nil {
+		return nil, fmt.Errorf("db not initialized")
+	}
+	s := &UsageSummary{}
+	err := db.QueryRow(`
+		SELECT COUNT(*), COALESCE(SUM(total_tokens),0), COALESCE(SUM(credits),0),
+		       COALESCE(CAST(AVG(latency_ms) AS INTEGER),0),
+		       SUM(CASE WHEN status != 200 THEN 1 ELSE 0 END)
+		FROM request_logs
+		WHERE ts >= ? AND ts <= ?`, fromTS, toTS).Scan(&s.TotalRequests, &s.TotalTokens, &s.TotalCredits, &s.AvgLatencyMs, &s.ErrorCount)
+	if err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+// ── API Key management ─────────────────────────────────────────────────────
+
+type APIKeyEntry struct {
+	ID        int
+	Name      string
+	APIKey    string
+	Enabled   bool
+	CreatedAt int64
+}
+
+func listAPIKeys() ([]APIKeyEntry, error) {
+	if db == nil {
+		return nil, fmt.Errorf("db not initialized")
+	}
+	rows, err := db.Query(`SELECT id, name, api_key, enabled, created_at FROM api_keys ORDER BY created_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []APIKeyEntry
+	for rows.Next() {
+		var k APIKeyEntry
+		var en int
+		if err := rows.Scan(&k.ID, &k.Name, &k.APIKey, &en, &k.CreatedAt); err != nil {
+			continue
+		}
+		k.Enabled = en == 1
+		out = append(out, k)
+	}
+	return out, nil
+}
+
+func addAPIKey(name, key string) error {
+	if db == nil {
+		return fmt.Errorf("db not initialized")
+	}
+	_, err := db.Exec(`INSERT INTO api_keys(name, api_key, enabled, created_at) VALUES(?,?,1,?)`,
+		name, key, time.Now().Unix())
+	return err
+}
+
+func removeAPIKey(id int) error {
+	if db == nil {
+		return fmt.Errorf("db not initialized")
+	}
+	_, err := db.Exec(`DELETE FROM api_keys WHERE id = ?`, id)
+	return err
+}
+
+func toggleAPIKey(id int, enabled bool) error {
+	if db == nil {
+		return fmt.Errorf("db not initialized")
+	}
+	en := 0
+	if enabled {
+		en = 1
+	}
+	_, err := db.Exec(`UPDATE api_keys SET enabled = ? WHERE id = ?`, en, id)
+	return err
+}
+
+// validateAPIKey checks if a key is valid and enabled. Returns key name.
+func validateAPIKey(key string) (string, bool) {
+	if db == nil || key == "" {
+		return "", false
+	}
+	var name string
+	var en int
+	err := db.QueryRow(`SELECT name, enabled FROM api_keys WHERE api_key = ?`, key).Scan(&name, &en)
+	if err != nil {
+		// Fallback: check legacy single-key config
+		legacyKey := cfgGet("api_key")
+		legacyEnabled := cfgBool("api_key_enabled", false)
+		if key == legacyKey && legacyEnabled {
+			return "(legacy)", true
+		}
+		return "", false
+	}
+	return name, en == 1
 }
 
 // ── Log queries ───────────────────────────────────────────────────────────

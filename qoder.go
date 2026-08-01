@@ -198,12 +198,43 @@ func getModelConfig(cred *patCredential, modelKey string) (*modelConfig, error) 
 		if ok {
 			return mc, nil
 		}
-		// Force refresh if model not found
+		// Model not in cache — but cache is fresh, so force refresh
 	} else {
 		modelConfigCacheMu.RUnlock()
 	}
 
 	return fetchModelConfig(cred, modelKey, true)
+}
+
+// getCachedModelConfig returns the model config from cache without fetching.
+// Returns nil if cache is stale or model not found.
+func getCachedModelConfig(modelKey string) *modelConfig {
+	modelConfigCacheMu.RLock()
+	defer modelConfigCacheMu.RUnlock()
+	if modelConfigCache == nil || time.Since(modelConfigCacheTime) >= 10*time.Minute {
+		return nil
+	}
+	return modelConfigCache[modelKey]
+}
+
+// ensureModelConfig returns cached config or fetches it. If fetch fails,
+// returns a minimal fallback config so requests don't hard-fail.
+func ensureModelConfig(cred *patCredential, modelKey string) *modelConfig {
+	if mc := getCachedModelConfig(modelKey); mc != nil {
+		return mc
+	}
+	mc, err := getModelConfig(cred, modelKey)
+	if err != nil {
+		log.Printf("warn: model config for %q not available: %v — using fallback", modelKey, err)
+		return &modelConfig{
+			Key:             modelKey,
+			IsReasoning:     false,
+			MaxOutputTokens: 65536,
+			Source:          "",
+			Raw:             nil,
+		}
+	}
+	return mc
 }
 
 func fetchModelConfig(cred *patCredential, modelKey string, retry bool) (*modelConfig, error) {
@@ -808,10 +839,7 @@ func generateCallID() string {
 
 // buildQoderRequestBody creates the exact JSON payload Qoder expects.
 func buildQoderRequestBody(modelKey string, messages []ChatMessage, maxTokens int, creds *patCredential, tools []ToolDef, thinkingEffort string, contextWindow int) ([]byte, error) {
-	mc, err := getModelConfig(creds, modelKey)
-	if err != nil {
-		return nil, fmt.Errorf("model config: %w", err)
-	}
+	mc := ensureModelConfig(creds, modelKey)
 
 	normalized, systemText := normalizeMessages(messages, tools)
 	lastUser := lastUserText(messages)
@@ -845,7 +873,7 @@ func buildQoderRequestBody(modelKey string, messages []ChatMessage, maxTokens in
 		"aliyun_user_type": "",
 		"system":          systemText,
 		"messages":        normalized,
-		"tools":           []interface{}{},
+		"tools":           toolsPayload(tools),
 		"parameters": map[string]interface{}{"max_tokens": maxTokens},
 		"chat_context": map[string]interface{}{
 			"chatPrompt":  "",
@@ -894,23 +922,42 @@ type ToolCallFn struct {
 	Arguments string `json:"arguments"`
 }
 
+// toolsPayload converts OpenAI tool defs to Qoder tool format.
+// Returns []interface{}{} when tools empty so JSON stays an array.
+func toolsPayload(tools []ToolDef) []interface{} {
+	if len(tools) == 0 {
+		return []interface{}{}
+	}
+	out := make([]interface{}, 0, len(tools))
+	for _, t := range tools {
+		out = append(out, map[string]interface{}{
+			"type":     "function",
+			"function": t.Function,
+		})
+	}
+	return out
+}
+
 // StreamCallback is called for each text chunk during streaming.
 type StreamCallback func(text string)
 
 // callQoder sends a chat completion request directly to Qoder's API with
 // full COSY signing and WAF encoding. No qodercli required.
 func callQoder(ctx context.Context, pat, modelKey string, messages []ChatMessage, maxTokens int, onChunk StreamCallback, tools []ToolDef, thinkingEffort string, contextWindow int) (*ChatResult, error) {
+	t0 := time.Now()
 	// 1. Resolve credential (PAT → job token + userId)
 	cred, err := getCredential(pat)
 	if err != nil {
 		return nil, fmt.Errorf("credential: %w", err)
 	}
+	t1 := time.Now()
 
 	// 2. Build request body (Qoder format)
 	payload, err := buildQoderRequestBody(modelKey, messages, maxTokens, cred, tools, thinkingEffort, contextWindow)
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
 	}
+	t2 := time.Now()
 
 	// 3. WAF-encode the body
 	encodedBody := qoderEncodeBody(payload)
@@ -924,6 +971,9 @@ func callQoder(ctx context.Context, pat, modelKey string, messages []ChatMessage
 	if err != nil {
 		return nil, fmt.Errorf("cosy sign: %w", err)
 	}
+	t3 := time.Now()
+
+	reqID := uuidString()
 
 	// 5. Send request (retry with different proxy on network error)
 	req, err := http.NewRequestWithContext(ctx, "POST", qoderChatURL, bytes.NewReader(encodedBody))
@@ -935,7 +985,7 @@ func callQoder(ctx context.Context, pat, modelKey string, messages []ChatMessage
 	req.Header.Set("Cache-Control", "no-cache")
 	req.Header.Set("Accept-Encoding", "identity")
 	req.Header.Set("X-Model-Key", modelKey)
-	if mc, _ := getModelConfig(cred, modelKey); mc != nil {
+	if mc := getCachedModelConfig(modelKey); mc != nil {
 		req.Header.Set("X-Model-Source", mc.Source)
 	}
 	req.Header.Set("Authorization", cosy.Authorization)
@@ -983,7 +1033,20 @@ func callQoder(ctx context.Context, pat, modelKey string, messages []ChatMessage
 	}
 
 	// 6. Parse SSE with Qoder envelope unwrapping
-	text, nativeToolCalls, err := unwrapQoderSSE(resp.Body, onChunk)
+	tSend := time.Now()
+	tFirstChunk := time.Time{}
+	wrappedChunk := onChunk
+	if onChunk != nil {
+		wrappedChunk = func(text string) {
+			if tFirstChunk.IsZero() {
+				tFirstChunk = time.Now()
+			}
+			onChunk(text)
+		}
+	}
+	text, nativeToolCalls, err := unwrapQoderSSE(resp.Body, wrappedChunk)
+	tDone := time.Now()
+	logCallQoderTiming(t0, t1, t2, t3, tSend, tFirstChunk, tDone, modelKey)
 	if err != nil {
 		return nil, fmt.Errorf("parse SSE: %w", err)
 	}
@@ -1023,7 +1086,24 @@ func callQoder(ctx context.Context, pat, modelKey string, messages []ChatMessage
 		}
 	}
 
-	return &ChatResult{Text: cleanText, ToolCalls: allToolCalls}, nil
+	return &ChatResult{Text: cleanText, ToolCalls: allToolCalls, RequestID: reqID}, nil
+}
+
+// logCallQoderTiming logs detailed timing breakdown for debugging latency.
+func logCallQoderTiming(t0, t1, t2, t3, tSend, tFirstChunk, tDone time.Time, modelKey string) {
+	credMs := t1.Sub(t0).Milliseconds()
+	buildMs := t2.Sub(t1).Milliseconds()
+	signMs := t3.Sub(t2).Milliseconds()
+	sendMs := tSend.Sub(t3).Milliseconds()
+	parseMs := tDone.Sub(tSend).Milliseconds()
+	totalMs := tDone.Sub(t0).Milliseconds()
+
+	if totalMs > 5000 {
+		log.Printf("perf: %s cred=%dms build=%dms sign=%dms send=%dms parse=%dms total=%dms",
+			modelKey, credMs, buildMs, signMs, sendMs, parseMs, totalMs)
+	} else if parseMs > 3000 {
+		log.Printf("perf: %s parse=%dms (slow streaming)", modelKey, parseMs)
+	}
 }
 
 // unwrapQoderSSE reads Qoder's SSE stream which wraps responses in a

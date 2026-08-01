@@ -305,7 +305,7 @@ func runUsageCLI(args []string) {
 		os.Exit(1)
 	}
 
-	rows, err := queryUsage(fromTS, toTS)
+	rows, err := queryUsageByPAT(fromTS, toTS)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
@@ -321,7 +321,7 @@ func runUsageCLI(args []string) {
 	// Group by PAT
 	byPAT := make(map[string][]UsageRow)
 	for _, r := range rows {
-		byPAT[r.PAT] = append(byPAT[r.PAT], r)
+		byPAT[r.Group] = append(byPAT[r.Group], r)
 	}
 
 	pats := make([]string, 0, len(byPAT))

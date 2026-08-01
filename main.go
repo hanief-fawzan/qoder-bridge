@@ -443,13 +443,27 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Auth check — if apiKey is set, require Bearer token
-	if apiKey != "" {
+	// Auth check — if API keys configured, require Bearer token
+	usedAPIKey := "(no key)"
+	if db != nil {
+		keys, _ := listAPIKeys()
+		if len(keys) > 0 {
+			auth := r.Header.Get("Authorization")
+			key := strings.TrimPrefix(auth, "Bearer ")
+			if name, ok := validateAPIKey(key); ok {
+				usedAPIKey = name
+			} else {
+				http.Error(w, `{"error":{"message":"invalid API key"}}`, 401)
+				return
+			}
+		}
+	} else if apiKey != "" {
 		auth := r.Header.Get("Authorization")
 		if auth != "Bearer "+apiKey {
 			http.Error(w, `{"error":{"message":"invalid API key"}}`, 401)
 			return
 		}
+		usedAPIKey = "(legacy)"
 	}
 
 	// Buffer body so we can decode twice (ChatRequest + raw extra fields)
@@ -508,11 +522,11 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 	// Check if this is a combo request
 	if comboModels, isCombo := resolveCombo(modelInput); isCombo {
 		if req.Stream && len(req.Tools) == 0 {
-			handleComboStream(w, r, req, modelInput, comboModels)
+			handleComboStream(w, r, req, modelInput, comboModels, usedAPIKey)
 		} else if req.Stream {
-			handleBufferedComboStream(w, r, req, modelInput, comboModels)
+			handleBufferedComboStream(w, r, req, modelInput, comboModels, usedAPIKey)
 		} else {
-			handleComboNonStream(w, r, req, modelInput, comboModels)
+			handleComboNonStream(w, r, req, modelInput, comboModels, usedAPIKey)
 		}
 		return
 	}
@@ -522,15 +536,15 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 	// Streaming raw ```json tool-call blocks to the client would leak them.
 	// Matches qoder-proxy: "with tools → buffered path below."
 	if req.Stream && len(req.Tools) == 0 {
-		handleStream(w, r, req, modelKey)
+		handleStream(w, r, req, modelKey, usedAPIKey)
 	} else if req.Stream {
-		handleBufferedStream(w, r, req, modelKey)
+		handleBufferedStream(w, r, req, modelKey, usedAPIKey)
 	} else {
-		handleNonStream(w, r, req, modelKey)
+		handleNonStream(w, r, req, modelKey, usedAPIKey)
 	}
 }
 
-func handleStream(w http.ResponseWriter, r *http.Request, req ChatRequest, modelKey string) {
+func handleStream(w http.ResponseWriter, r *http.Request, req ChatRequest, modelKey string, apikey string) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -556,7 +570,7 @@ func handleStream(w http.ResponseWriter, r *http.Request, req ChatRequest, model
 				Choices: []SSEChoice{{Index: 0, Delta: json.RawMessage(`{"content":` + mustQuote(text) + `}`)}},
 			})
 		}
-	}, req.Tools, req.ThinkingEffort, req.ContextWindow, r.RemoteAddr)
+	}, req.Tools, req.ThinkingEffort, req.ContextWindow, r.RemoteAddr, apikey)
 
 	if err != nil {
 		log.Printf("stream error: %v", err)
@@ -602,8 +616,8 @@ func handleStream(w http.ResponseWriter, r *http.Request, req ChatRequest, model
 	}
 }
 
-func handleNonStream(w http.ResponseWriter, r *http.Request, req ChatRequest, modelKey string) {
-	result, err := runWithPATRotation(r.Context(), patPool, modelKey, req.Messages, req.MaxTokens, nil, req.Tools, req.ThinkingEffort, req.ContextWindow, r.RemoteAddr)
+func handleNonStream(w http.ResponseWriter, r *http.Request, req ChatRequest, modelKey string, apikey string) {
+	result, err := runWithPATRotation(r.Context(), patPool, modelKey, req.Messages, req.MaxTokens, nil, req.Tools, req.ThinkingEffort, req.ContextWindow, r.RemoteAddr, apikey)
 	if err != nil {
 		forwardUpstreamError(w, err)
 		return
@@ -636,7 +650,7 @@ func handleNonStream(w http.ResponseWriter, r *http.Request, req ChatRequest, mo
 // then emits clean SSE chunks. Used when stream=true but tools are present —
 // the model may emit tool_calls as ```json blocks that must not leak to the client.
 // Matches qoder-proxy's buffered path for tool-call requests.
-func handleBufferedStream(w http.ResponseWriter, r *http.Request, req ChatRequest, modelKey string) {
+func handleBufferedStream(w http.ResponseWriter, r *http.Request, req ChatRequest, modelKey string, apikey string) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -646,7 +660,7 @@ func handleBufferedStream(w http.ResponseWriter, r *http.Request, req ChatReques
 	created := time.Now().Unix()
 
 	// Buffer: no streaming callback
-	result, err := runWithPATRotation(r.Context(), patPool, modelKey, req.Messages, req.MaxTokens, nil, req.Tools, req.ThinkingEffort, req.ContextWindow, r.RemoteAddr)
+	result, err := runWithPATRotation(r.Context(), patPool, modelKey, req.Messages, req.MaxTokens, nil, req.Tools, req.ThinkingEffort, req.ContextWindow, r.RemoteAddr, apikey)
 
 	if err != nil {
 		log.Printf("buffered stream error: %v", err)
@@ -738,7 +752,7 @@ func handleBufferedStream(w http.ResponseWriter, r *http.Request, req ChatReques
 
 // ── Combo handlers ──────────────────────────────────────────────────────────
 
-func handleComboNonStream(w http.ResponseWriter, r *http.Request, req ChatRequest, comboName string, modelList []string) {
+func handleComboNonStream(w http.ResponseWriter, r *http.Request, req ChatRequest, comboName string, modelList []string, apikey string) {
 	const maxRounds = 3
 	var lastErr error
 	for round := 0; round < maxRounds; round++ {
@@ -749,7 +763,7 @@ func handleComboNonStream(w http.ResponseWriter, r *http.Request, req ChatReques
 			}
 			log.Printf("combo %q: round %d, trying qd/%s", comboName, round+1, modelKey)
 
-			result, err := runWithPATRotation(r.Context(), patPool, modelKey, req.Messages, req.MaxTokens, nil, req.Tools, req.ThinkingEffort, req.ContextWindow, r.RemoteAddr)
+			result, err := runWithPATRotation(r.Context(), patPool, modelKey, req.Messages, req.MaxTokens, nil, req.Tools, req.ThinkingEffort, req.ContextWindow, r.RemoteAddr, apikey)
 			if err == nil {
 				text := ""
 				if result != nil {
@@ -784,7 +798,7 @@ func handleComboNonStream(w http.ResponseWriter, r *http.Request, req ChatReques
 	forwardUpstreamError(w, fmt.Errorf("combo %s: all %d rounds exhausted, last: %w", comboName, maxRounds, lastErr))
 }
 
-func handleComboStream(w http.ResponseWriter, r *http.Request, req ChatRequest, comboName string, modelList []string) {
+func handleComboStream(w http.ResponseWriter, r *http.Request, req ChatRequest, comboName string, modelList []string, apikey string) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -823,7 +837,7 @@ comboRounds:
 						Choices: []SSEChoice{{Index: 0, Delta: json.RawMessage(`{"content":` + mustQuote(text) + `}`)}},
 					})
 				}
-			}, req.Tools, req.ThinkingEffort, req.ContextWindow, r.RemoteAddr)
+			}, req.Tools, req.ThinkingEffort, req.ContextWindow, r.RemoteAddr, apikey)
 
 			if err == nil {
 				_ = result
@@ -907,7 +921,7 @@ comboRounds:
 // handleBufferedComboStream buffers the full response for each combo model,
 // parses tool_calls from text, then emits clean SSE chunks. Used when
 // stream=true and tools are present, so raw ```json tool-call blocks don't leak.
-func handleBufferedComboStream(w http.ResponseWriter, r *http.Request, req ChatRequest, comboName string, modelList []string) {
+func handleBufferedComboStream(w http.ResponseWriter, r *http.Request, req ChatRequest, comboName string, modelList []string, apikey string) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -927,7 +941,7 @@ func handleBufferedComboStream(w http.ResponseWriter, r *http.Request, req ChatR
 			log.Printf("combo %q: round %d, trying qd/%s", comboName, round+1, modelKey)
 
 			// Buffer: no streaming callback
-			result, err := runWithPATRotation(r.Context(), patPool, modelKey, req.Messages, req.MaxTokens, nil, req.Tools, req.ThinkingEffort, req.ContextWindow, r.RemoteAddr)
+			result, err := runWithPATRotation(r.Context(), patPool, modelKey, req.Messages, req.MaxTokens, nil, req.Tools, req.ThinkingEffort, req.ContextWindow, r.RemoteAddr, apikey)
 			if err == nil {
 				emitBufferedComboSSE(w, flusher, id, created, comboName, result)
 				return
@@ -1044,7 +1058,7 @@ func handleQuota(w http.ResponseWriter, r *http.Request) {
 
 // ── PAT rotation ────────────────────────────────────────────────────────────
 
-func runWithPATRotation(ctx context.Context, pool *PATPool, modelKey string, messages []ChatMessage, maxTokens int, onChunk StreamCallback, tools []ToolDef, thinkingEffort string, contextWindow int, clientIP string) (*ChatResult, error) {
+func runWithPATRotation(ctx context.Context, pool *PATPool, modelKey string, messages []ChatMessage, maxTokens int, onChunk StreamCallback, tools []ToolDef, thinkingEffort string, contextWindow int, clientIP string, apikey string) (*ChatResult, error) {
 	start := time.Now()
 
 	// Smart anti-ban delay: random jitter between 0 and requestDelay ms
@@ -1148,6 +1162,7 @@ done:
 		Error:            errMsg,
 		LatencyMs:        latency,
 		ClientIP:         clientIP,
+		APIKey:           apikey,
 	})
 
 	proxyLabel := getProxyInfo()

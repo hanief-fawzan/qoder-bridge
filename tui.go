@@ -296,55 +296,109 @@ func mainMenu() tview.Primitive {
 // ── API Keys ──────────────────────────────────────────────────────────────
 
 func apiKeyMenu() tview.Primitive {
-	key := cfgGet("api_key")
-	enabled := cfgBool("api_key_enabled", false)
-
-	status := colorRed + "disabled"
-	if enabled {
-		status = colorGreen + "enabled"
-	}
-	masked := "(not set)"
-	if key != "" {
-		masked = key[:min(8, len(key))] + "..." + key[max(0, len(key)-4):]
+	keys, err := listAPIKeys()
+	if err != nil {
+		keys = []APIKeyEntry{}
 	}
 
-	list := tview.NewList().
-		AddItem("  Generate New Key", "Create random sk-* key + auto-enable", 'g', func() {
+	list := tview.NewList()
+	list.AddItem("  Generate New Key", "Create named sk-* key", 'g', func() {
+		showInput("Key name", "hermes-desktop", func(name string) {
+			if name == "" {
+				name = "generated"
+			}
 			b := make([]byte, 24)
 			rand.Read(b)
 			newKey := "sk-" + hex.EncodeToString(b)
-			cfgSet("api_key", newKey)
-			cfgSet("api_key_enabled", "1")
-			showMsg(fmt.Sprintf("%s✅ Generated & enabled:%s\n%s", colorGreen, colorReset, newKey), "apikey", apiKeyMenu)
-		}).
-		AddItem("  Toggle On/Off", fmt.Sprintf("Currently: %s%s", status, colorReset), 't', func() {
-			if enabled {
-				cfgSet("api_key_enabled", "0")
-			} else {
-				cfgSet("api_key_enabled", "1")
+			if err := addAPIKey(name, newKey); err != nil {
+				showMsg(fmt.Sprintf("%s❌ Failed:%s\n%v", colorRed, colorReset, err), "apikey", apiKeyMenu)
+				return
 			}
-			// Rebuild so status text updates
+			showMsg(fmt.Sprintf("%s✅ Generated key [%s]:%s\n%s", colorGreen, name, colorReset, newKey), "apikey", apiKeyMenu)
+			// Rebuild menu for real-time sync
 			pages.RemovePage("sub")
 			pushPage("sub", apiKeyMenu())
-		}).
-		AddItem("  View Current Key", masked, 'v', func() {
-			if key == "" {
-				showMsg("No API key configured.", "apikey", apiKeyMenu)
-			} else {
-				showMsg(fmt.Sprintf("Key: %s\nStatus: %s%s", key, status, colorReset), "apikey", apiKeyMenu)
-			}
-		}).
-		AddItem("  Clear Key", "Remove key entirely", 'x', func() {
-			cfgSet("api_key", "")
+		})
+	})
+	list.AddItem("  View Keys (table)", fmt.Sprintf("%d key(s) configured", len(keys)), 'v', func() {
+		pushPage("sub", apiKeyTableView())
+	})
+
+	// Legacy single-key controls for backward compatibility
+	legacyKey := cfgGet("api_key")
+	legacyEnabled := cfgBool("api_key_enabled", false)
+	legacyStatus := colorRed + "disabled"
+	if legacyEnabled {
+		legacyStatus = colorGreen + "enabled"
+	}
+	legacyMasked := "(not set)"
+	if legacyKey != "" {
+		legacyMasked = legacyKey[:min(8, len(legacyKey))] + "..." + legacyKey[max(0, len(legacyKey)-4):]
+	}
+	list.AddItem("  Toggle Legacy Key", fmt.Sprintf("Currently: %s%s", legacyStatus, colorReset), 't', func() {
+		if legacyEnabled {
 			cfgSet("api_key_enabled", "0")
-			pages.RemovePage("sub")
-			pushPage("sub", apiKeyMenu())
-		}).
-		AddItem("  ← Back", "Esc to go back", 'b', func() { goBack() })
+		} else {
+			cfgSet("api_key_enabled", "1")
+		}
+		pages.RemovePage("sub")
+		pushPage("sub", apiKeyMenu())
+	})
+	list.AddItem("  View Legacy Key", legacyMasked, 'l', func() {
+		if legacyKey == "" {
+			showMsg("No legacy API key configured.", "apikey", apiKeyMenu)
+		} else {
+			showMsg(fmt.Sprintf("Legacy Key: %s\nStatus: %s%s", legacyKey, legacyStatus, colorReset), "apikey", apiKeyMenu)
+		}
+	})
+	list.AddItem("  Clear Legacy Key", "Remove legacy key", 'x', func() {
+		cfgSet("api_key", "")
+		cfgSet("api_key_enabled", "0")
+		pages.RemovePage("sub")
+		pushPage("sub", apiKeyMenu())
+	})
+	list.AddItem("  ← Back", "Esc to go back", 'b', func() { goBack() })
 
 	list.SetBorder(true).SetTitle(colorTitle + " API Keys ").SetTitleAlign(tview.AlignCenter)
 	wireEsc(list)
 	return wrapWithHint(list, fmt.Sprintf("%s↑↓%s navigate   %sEnter%s select   %sEsc%s back", colorKey, colorReset, colorKey, colorReset, colorKey, colorReset))
+}
+
+func apiKeyTableView() tview.Primitive {
+	t := tview.NewTable().SetFixed(1, 0).SetSelectable(true, false)
+	t.SetBorder(true).SetTitle(colorTitle + " API Keys " + colorReset).SetTitleAlign(tview.AlignCenter)
+
+	headers := []string{"ID", "Name", "Key", "Status", "Created"}
+	for i, h := range headers {
+		t.SetCell(0, i, tview.NewTableCell(h).SetTextColor(tcell.ColorYellow).SetSelectable(false).SetExpansion(1))
+	}
+
+	keys, err := listAPIKeys()
+	if err != nil {
+		t.SetCell(1, 0, tview.NewTableCell("DB error: "+err.Error()).SetSelectable(false))
+		return wrapTable(t)
+	}
+	if len(keys) == 0 {
+		t.SetCell(1, 0, tview.NewTableCell("No API keys. Generate one from the menu.").SetSelectable(false))
+		return wrapTable(t)
+	}
+
+	for i, k := range keys {
+		status := colorRed + "disabled" + colorReset
+		if k.Enabled {
+			status = colorGreen + "enabled" + colorReset
+		}
+		masked := k.APIKey[:min(8, len(k.APIKey))] + "..." + k.APIKey[max(0, len(k.APIKey)-4):]
+		t.SetCell(i+1, 0, tview.NewTableCell(fmt.Sprintf("%d", k.ID)).SetExpansion(1))
+		t.SetCell(i+1, 1, tview.NewTableCell(k.Name).SetExpansion(2))
+		t.SetCell(i+1, 2, tview.NewTableCell(masked).SetExpansion(3))
+		t.SetCell(i+1, 3, tview.NewTableCell(status).SetExpansion(1))
+		t.SetCell(i+1, 4, tview.NewTableCell(formatTS(k.CreatedAt)).SetExpansion(2))
+	}
+
+	view := wrapTable(t)
+	// Add inline actions hint
+	return view
 }
 
 // ── Proxy ─────────────────────────────────────────────────────────────────
@@ -623,12 +677,12 @@ func importMenu() tview.Primitive {
 
 func usageMenu() tview.Primitive {
 	list := tview.NewList().
-		AddItem("  Today", "Since midnight", 't', func() { showUsage("today") }).
-		AddItem("  This Week", "Past 7 days", 'w', func() { showUsage("week") }).
-		AddItem("  This Month", "Past 30 days", 'm', func() { showUsage("month") }).
-		AddItem("  This Year", "Past 365 days", 'y', func() { showUsage("year") }).
+		AddItem("  Today", "Since midnight", 't', func() { showUsage("today", "pat") }).
+		AddItem("  This Week", "Past 7 days", 'w', func() { showUsage("week", "pat") }).
+		AddItem("  This Month", "Past 30 days", 'm', func() { showUsage("month", "pat") }).
+		AddItem("  This Year", "Past 365 days", 'y', func() { showUsage("year", "pat") }).
 		AddItem("  Custom Range", "DD-MM-YYYY to DD-MM-YYYY", 'c', func() {
-			showDateInput(func(from, to string) { showUsage("custom", from, to) })
+			showDateInput(func(from, to string) { showUsage("custom", "pat", from, to) })
 		}).
 		AddItem("  ← Back", "Esc", 'b', func() { goBack() })
 
@@ -637,7 +691,7 @@ func usageMenu() tview.Primitive {
 	return wrapWithHint(list, fmt.Sprintf("%s↑↓%s navigate   %sEnter%s select   %sEsc%s back", colorKey, colorReset, colorKey, colorReset, colorKey, colorReset))
 }
 
-func showUsage(period string, dates ...string) {
+func showUsage(period string, groupBy string, dates ...string) {
 	var args []string
 	if period == "custom" && len(dates) >= 2 {
 		args = []string{"custom", dates[0], dates[1]}
@@ -649,31 +703,96 @@ func showUsage(period string, dates ...string) {
 		showMsg(fmt.Sprintf("Error: %v", err), "usage", usageMenu)
 		return
 	}
-	rows, err := queryUsage(fromTS, toTS)
+
+	var rows []UsageRow
+	if groupBy == "apikey" {
+		rows, err = queryUsageByAPIKey(fromTS, toTS)
+	} else {
+		rows, err = queryUsageByPAT(fromTS, toTS)
+	}
 	if err != nil {
 		showMsg(fmt.Sprintf("Error: %v", err), "usage", usageMenu)
 		return
 	}
 
-	t := tview.NewTable().SetFixed(1, 0).SetSelectable(true, false)
-	t.SetBorder(true).SetTitle(fmt.Sprintf(" %sUsage: %s %s ", colorTitle, label, colorReset)).SetTitleAlign(tview.AlignCenter)
+	summary, _ := queryUsageSummary(fromTS, toTS)
 
-	for i, h := range []string{"PAT", "Model", "Requests", "Tokens", "Credits"} {
+	t := tview.NewTable().SetFixed(1, 0).SetSelectable(true, false)
+	titleGroup := "PAT"
+	if groupBy == "apikey" {
+		titleGroup = "API Key"
+	}
+	t.SetBorder(true).SetTitle(fmt.Sprintf(" %sUsage: %s (by %s)%s ", colorTitle, label, titleGroup, colorReset)).SetTitleAlign(tview.AlignCenter)
+
+	headers := []string{titleGroup, "Model", "Req", "Tokens", "Credits", "Avg Lat"}
+	for i, h := range headers {
 		t.SetCell(0, i, tview.NewTableCell(h).SetTextColor(tcell.ColorYellow).SetSelectable(false).SetExpansion(1))
 	}
+
+	rowIdx := 1
 	if len(rows) == 0 {
 		t.SetCell(1, 0, tview.NewTableCell("No data for this period.").SetSelectable(false))
+		rowIdx = 2
 	} else {
-		for i, r := range rows {
-			t.SetCell(i+1, 0, tview.NewTableCell(r.PAT).SetExpansion(1))
-			t.SetCell(i+1, 1, tview.NewTableCell(r.Model).SetExpansion(1))
-			t.SetCell(i+1, 2, tview.NewTableCell(fmt.Sprintf("%d", r.Requests)).SetAlign(tview.AlignRight).SetExpansion(1))
-			t.SetCell(i+1, 3, tview.NewTableCell(fmt.Sprintf("%d", r.Tokens)).SetAlign(tview.AlignRight).SetExpansion(1))
-			t.SetCell(i+1, 4, tview.NewTableCell(fmt.Sprintf("%.2f", r.Credits)).SetAlign(tview.AlignRight).SetExpansion(1))
+		for _, r := range rows {
+			avgLat := 0
+			if r.Requests > 0 {
+				avgLat = int(r.LastTS-r.FirstTS) / r.Requests
+			}
+			t.SetCell(rowIdx, 0, tview.NewTableCell(r.Group).SetExpansion(2))
+			t.SetCell(rowIdx, 1, tview.NewTableCell(r.Model).SetExpansion(1))
+			t.SetCell(rowIdx, 2, tview.NewTableCell(fmt.Sprintf("%d", r.Requests)).SetAlign(tview.AlignRight).SetExpansion(1))
+			t.SetCell(rowIdx, 3, tview.NewTableCell(fmt.Sprintf("%d", r.Tokens)).SetAlign(tview.AlignRight).SetExpansion(1))
+			t.SetCell(rowIdx, 4, tview.NewTableCell(fmt.Sprintf("%.2f", r.Credits)).SetAlign(tview.AlignRight).SetExpansion(1))
+			t.SetCell(rowIdx, 5, tview.NewTableCell(fmt.Sprintf("%ds", avgLat)).SetAlign(tview.AlignRight).SetExpansion(1))
+			rowIdx++
 		}
 	}
 
-	pushPage("sub", wrapTable(t))
+	// Summary row
+	if summary != nil {
+		t.SetCell(rowIdx, 0, tview.NewTableCell("TOTAL").SetTextColor(tcell.ColorAqua).SetSelectable(false).SetExpansion(2))
+		t.SetCell(rowIdx, 1, tview.NewTableCell("").SetSelectable(false))
+		t.SetCell(rowIdx, 2, tview.NewTableCell(fmt.Sprintf("%d", summary.TotalRequests)).SetTextColor(tcell.ColorAqua).SetAlign(tview.AlignRight).SetSelectable(false))
+		t.SetCell(rowIdx, 3, tview.NewTableCell(fmt.Sprintf("%d", summary.TotalTokens)).SetTextColor(tcell.ColorAqua).SetAlign(tview.AlignRight).SetSelectable(false))
+		t.SetCell(rowIdx, 4, tview.NewTableCell(fmt.Sprintf("%.2f", summary.TotalCredits)).SetTextColor(tcell.ColorAqua).SetAlign(tview.AlignRight).SetSelectable(false))
+		t.SetCell(rowIdx, 5, tview.NewTableCell(fmt.Sprintf("%dms", summary.AvgLatencyMs)).SetTextColor(tcell.ColorAqua).SetAlign(tview.AlignRight).SetSelectable(false))
+		if summary.ErrorCount > 0 {
+			rowIdx++
+			t.SetCell(rowIdx, 0, tview.NewTableCell(fmt.Sprintf("%s%d errors%s", colorRed, summary.ErrorCount, colorReset)).SetSelectable(false))
+		}
+	}
+
+	// Toggle hint
+	nextGroup := "API Key"
+	if groupBy == "apikey" {
+		nextGroup = "PAT"
+	}
+	hint := tview.NewTextView().SetDynamicColors(true).
+		SetText(fmt.Sprintf("  %s↑↓%s navigate   %sEsc%s back   %s't'%s toggle to by %s", colorKey, colorReset, colorKey, colorReset, colorKey, colorReset, nextGroup))
+
+	wireEsc(t)
+	flex := tview.NewFlex().SetDirection(tview.FlexRow).
+		AddItem(t, 0, 1, true).
+		AddItem(hint, 1, 0, false)
+	flex.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		if event.Key() == tcell.KeyEscape {
+			goBack()
+			return nil
+		}
+		if event.Rune() == 't' || event.Rune() == 'T' {
+			pages.RemovePage("sub")
+			if groupBy == "pat" {
+				showUsage(period, "apikey", dates...)
+			} else {
+				showUsage(period, "pat", dates...)
+			}
+			return nil
+		}
+		return event
+	})
+
+	pushPage("sub", flex)
 }
 
 // ── Logs ──────────────────────────────────────────────────────────────────
