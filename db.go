@@ -287,7 +287,7 @@ func queryUsageSummary(fromTS, toTS int64) (*UsageSummary, error) {
 		return nil, fmt.Errorf("db not initialized")
 	}
 	s := &UsageSummary{}
-	var errCount interface{}
+	var errCount int64 // modernc.org/sqlite returns SUM() as int64
 	err := db.QueryRow(`
 		SELECT COUNT(*), COALESCE(SUM(total_tokens),0), COALESCE(SUM(credits),0),
 		       COALESCE(CAST(AVG(latency_ms) AS INTEGER),0),
@@ -297,9 +297,7 @@ func queryUsageSummary(fromTS, toTS int64) (*UsageSummary, error) {
 	if err != nil {
 		return nil, err
 	}
-	if v, ok := errCount.(int64); ok {
-		s.ErrorCount = int(v)
-	}
+	s.ErrorCount = int(errCount)
 	return s, nil
 }
 

@@ -151,7 +151,14 @@ func buildSocks5Client(u *url.URL) (*http.Client, string) {
 		host += ":1080"
 	}
 
-	dialer, err := proxy.SOCKS5("tcp", host, auth, proxy.Direct)
+	// Underlying dialer with explicit timeouts so a stalled SOCKS5
+	// handshake (e.g. TCP-connect to a dead proxy host) cannot pin a
+	// goroutine past client disconnect or beyond a reasonable bound.
+	underlying := &net.Dialer{
+		Timeout:   15 * time.Second,
+		KeepAlive: 30 * time.Second,
+	}
+	dialer, err := proxy.SOCKS5("tcp", host, auth, underlying)
 	if err != nil {
 		log.Printf("proxy: socks5 dialer error: %v — using direct", err)
 		return &http.Client{Transport: streamingTransport()}, "direct"
@@ -163,14 +170,16 @@ func buildSocks5Client(u *url.URL) (*http.Client, string) {
 	}
 
 	t := streamingTransport()
-	// Honor ctx cancellation even when the SOCKS5 dialer doesn't
-	// expose DialContext. proxy.Direct has no timeout and a stalled
-	// handshake can otherwise pin a goroutine past client disconnect.
 	cd, _ := dialer.(contextDialer)
 	t.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		// Prefer the SOCKS5 dialer's DialContext (it now uses our
+		// timeout-bounded underlying net.Dialer, so cancellation and
+		// timeout both work cleanly).
 		if cd != nil {
 			return cd.DialContext(ctx, network, addr)
 		}
+		// Belt-and-suspenders fallback: run the non-context dial in a
+		// goroutine so ctx cancellation can short-circuit it.
 		type dialResult struct {
 			c   net.Conn
 			err error

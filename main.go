@@ -1275,7 +1275,10 @@ func runWithPATRotation(ctx context.Context, pool *PATPool, modelKey string, mes
 	}
 done:
 
-	// Log to DB
+	// Log to DB.
+	// Prompt tokens are still charged on failure (bytes were sent upstream),
+	// but completion + credits are zeroed — failed requests consume only
+	// input-side cost. credits reflects the *billable* outcome.
 	latency := time.Since(start).Milliseconds()
 	promptTokens := 0
 	for _, m := range messages {
@@ -1291,7 +1294,12 @@ done:
 		}
 	}
 	totalTokens := promptTokens + completionTokens
-	credits := estimateCredits(modelKey, totalTokens)
+	// Estimate credits only on success — failed requests are logged but
+	// not billed (the upstream may have already failed before charging).
+	credits := 0.0
+	if lastErr == nil {
+		credits = estimateCredits(modelKey, totalTokens)
+	}
 
 	status := 200
 	errMsg := ""
