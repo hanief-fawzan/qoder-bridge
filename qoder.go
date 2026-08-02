@@ -1137,6 +1137,14 @@ func callQoder(ctx context.Context, pat, modelKey string, messages []ChatMessage
 			if argsJSON == "" {
 				argsJSON = "{}"
 			}
+			// Skip tool calls with empty arguments — model likely failed to
+			// populate them. Sending empty-arg tool_calls causes the client
+			// (Hermes) to execute a tool with no input, which is always wrong.
+			// Better to fall through and let the text content be the response.
+			if argsJSON == "{}" {
+				log.Printf("warn: native tool_call %q has empty arguments, skipping", name)
+				continue
+			}
 			callID, _ := tc["id"].(string)
 			if callID == "" {
 				callID = generateCallID()
@@ -1147,6 +1155,14 @@ func callQoder(ctx context.Context, pat, modelKey string, messages []ChatMessage
 				Function: ToolCallFn{Name: name, Arguments: argsJSON},
 			})
 		}
+	}
+
+	// If native path produced no usable tool calls (all had empty args),
+	// re-check text-parsed path as fallback. Model may have emitted the
+	// tool call as a ```json block in the text stream.
+	if len(allToolCalls) == 0 && len(textToolCalls) == 0 && text != "" {
+		textToolCalls, cleanText = parseToolCallsFromText(text)
+		allToolCalls = textToolCalls
 	}
 
 	return &ChatResult{Text: cleanText, ToolCalls: allToolCalls, RequestID: reqID}, nil
