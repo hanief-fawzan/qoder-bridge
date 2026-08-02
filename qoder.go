@@ -1107,13 +1107,15 @@ func callQoder(ctx context.Context, pat, modelKey string, messages []ChatMessage
 	if len(textToolCalls) > 0 {
 		allToolCalls = textToolCalls
 	} else if len(nativeToolCalls) > 0 {
-		for _, tc := range nativeToolCalls {
-			// Support both flat format {"name":"...","arguments":{...}}
-			// and OpenAI format {"function":{"name":"...","arguments":"..."}}
+		// Upstream sends incremental deltas for the same tool call (same
+		// index) with partial function.arguments in each chunk. We must
+		// accumulate by index and concatenate argument fragments before
+		// building the final ToolCall list.
+		merged := accumulateNativeToolCalls(nativeToolCalls)
+		for _, tc := range merged {
 			name, _ := tc["name"].(string)
 			args := tc["arguments"]
 			if name == "" {
-				// Try OpenAI nested format
 				if fn, ok := tc["function"].(map[string]interface{}); ok {
 					name, _ = fn["name"].(string)
 					args = fn["arguments"]
@@ -1135,7 +1137,6 @@ func callQoder(ctx context.Context, pat, modelKey string, messages []ChatMessage
 			if argsJSON == "" {
 				argsJSON = "{}"
 			}
-			// Use existing ID if present, otherwise generate
 			callID, _ := tc["id"].(string)
 			if callID == "" {
 				callID = generateCallID()
@@ -1149,6 +1150,90 @@ func callQoder(ctx context.Context, pat, modelKey string, messages []ChatMessage
 	}
 
 	return &ChatResult{Text: cleanText, ToolCalls: allToolCalls, RequestID: reqID}, nil
+}
+
+// accumulateNativeToolCalls merges streaming tool_call deltas by their index.
+// Upstream sends one delta per SSE chunk with the same `index` field; each
+// delta may carry only a partial piece of function.arguments. This function
+// concatenates argument fragments and keeps the first non-empty id/name/type.
+func accumulateNativeToolCalls(deltas []map[string]interface{}) []map[string]interface{} {
+	type acc struct {
+		id   string
+		name string
+		args strings.Builder
+		typ  string
+	}
+	byIndex := make(map[int]*acc)
+	maxIdx := -1
+	for _, d := range deltas {
+		idx := 0
+		if f, ok := d["index"].(float64); ok {
+			idx = int(f)
+		} else if i, ok := d["index"].(int); ok {
+			idx = i
+		}
+		if _, ok := byIndex[idx]; !ok {
+			byIndex[idx] = &acc{typ: "function"}
+			if idx > maxIdx {
+				maxIdx = idx
+			}
+		}
+		a := byIndex[idx]
+		if id, ok := d["id"].(string); ok && id != "" && a.id == "" {
+			a.id = id
+		}
+		if t, ok := d["type"].(string); ok && t != "" {
+			a.typ = t
+		}
+		name, _ := d["name"].(string)
+		args := d["arguments"]
+		if name == "" || args == nil {
+			if fn, ok := d["function"].(map[string]interface{}); ok {
+				if n, ok := fn["name"].(string); ok && n != "" && a.name == "" {
+					a.name = n
+				}
+				if arg, ok := fn["arguments"]; ok {
+					args = arg
+				}
+				if id, ok := fn["id"].(string); ok && id != "" && a.id == "" {
+					a.id = id
+				}
+			}
+		} else if a.name == "" {
+			a.name = name
+		}
+		if args != nil {
+			switch v := args.(type) {
+			case string:
+				a.args.WriteString(v)
+			default:
+				if b, err := json.Marshal(v); err == nil {
+					a.args.WriteString(string(b))
+				}
+			}
+		}
+	}
+	out := make([]map[string]interface{}, 0, maxIdx+1)
+	for i := 0; i <= maxIdx; i++ {
+		a, ok := byIndex[i]
+		if !ok {
+			continue
+		}
+		argsStr := a.args.String()
+		if argsStr == "" {
+			argsStr = "{}"
+		}
+		out = append(out, map[string]interface{}{
+			"id":   a.id,
+			"type": a.typ,
+			"name": a.name,
+			"function": map[string]interface{}{
+				"name":      a.name,
+				"arguments": argsStr,
+			},
+		})
+	}
+	return out
 }
 
 // logCallQoderTiming logs detailed timing breakdown for debugging latency.

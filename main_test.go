@@ -946,6 +946,58 @@ func TestRecoverPanicSendsErrorChunk(t *testing.T) {
 	}
 }
 
+func TestAccumulateNativeToolCalls(t *testing.T) {
+	// Simulates upstream sending 3 incremental deltas for index 0:
+	//   delta 1: id + name + arguments="{"
+	//   delta 2: arguments="\"command\":\"ls\""
+	//   delta 3: arguments="}"
+	// Expected: single tool call with full arguments.
+	deltas := []map[string]interface{}{
+		{"index": 0, "id": "call_abc123", "type": "function", "function": map[string]interface{}{"name": "terminal", "arguments": "{"}},
+		{"index": 0, "function": map[string]interface{}{"arguments": "\"command\":\"ls\""}},
+		{"index": 0, "function": map[string]interface{}{"arguments": "}"}},
+	}
+	merged := accumulateNativeToolCalls(deltas)
+	if len(merged) != 1 {
+		t.Fatalf("expected 1 merged tool call, got %d", len(merged))
+	}
+	tc := merged[0]
+	id, _ := tc["id"].(string)
+	if id != "call_abc123" {
+		t.Errorf("expected id call_abc123, got %s", id)
+	}
+	fn, _ := tc["function"].(map[string]interface{})
+	name, _ := fn["name"].(string)
+	if name != "terminal" {
+		t.Errorf("expected name terminal, got %s", name)
+	}
+	args, _ := fn["arguments"].(string)
+	expected := "{\"command\":\"ls\"}"
+	if args != expected {
+		t.Errorf("expected arguments %s, got %s", expected, args)
+	}
+}
+
+func TestAccumulateNativeToolCallsMultipleIndices(t *testing.T) {
+	// Two parallel tool calls at index 0 and 1.
+	deltas := []map[string]interface{}{
+		{"index": 0, "id": "call_a", "type": "function", "function": map[string]interface{}{"name": "read_file", "arguments": "{\"path\":\"/tmp/x\"}"}},
+		{"index": 1, "id": "call_b", "type": "function", "function": map[string]interface{}{"name": "terminal", "arguments": "{\"command\":\"pwd\"}"}},
+	}
+	merged := accumulateNativeToolCalls(deltas)
+	if len(merged) != 2 {
+		t.Fatalf("expected 2 merged tool calls, got %d", len(merged))
+	}
+	fn0, _ := merged[0]["function"].(map[string]interface{})
+	if fn0["name"] != "read_file" {
+		t.Errorf("expected index 0 name=read_file, got %v", fn0["name"])
+	}
+	fn1, _ := merged[1]["function"].(map[string]interface{})
+	if fn1["name"] != "terminal" {
+		t.Errorf("expected index 1 name=terminal, got %v", fn1["name"])
+	}
+}
+
 // flushingRecorder satisfies http.Flusher by delegating to the underlying
 // httptest.ResponseRecorder's write calls. httptest.ResponseRecorder does
 // NOT implement Flusher by default.
