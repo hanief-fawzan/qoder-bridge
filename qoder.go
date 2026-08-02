@@ -600,6 +600,10 @@ func truncate(s string, n int) string {
 // Supports: ```json, ```, ```tool_call, ```function_call — with or without newline after tag.
 var jsonBlockRe = regexp.MustCompile("(?s)" + "`" + "`" + "`" + `(?:json|tool_call|function_call)?\s*\n?([\s\S]*?)\n?\s*` + "`" + "`" + "`")
 
+// Regex for <tool_call>...</tool_call> XML-style tool calls.
+// Model may emit: <tool_call>\n{"name":"terminal","arguments":{"command":"pwd"}}\n</tool_call>
+var xmlToolCallRe = regexp.MustCompile(`(?s)\x3ctool_call\x3e\s*\n?([\s\S]*?)\n?\s*\x3c/tool_call\x3e`)
+
 // Regex for [assistant called tool: NAME with arguments: ...] text format.
 // Captures the tool name; arguments are extracted separately via balanced
 // bracket counting to handle nested arrays/objects.
@@ -612,6 +616,43 @@ var inlineToolCallRe = regexp.MustCompile(`\[assistant called tool: (\S+) with a
 //  3. [assistant called tool: NAME with arguments: ARGS] (inline text format)
 // Returns parsed tool_calls and clean text with tool_call content removed.
 func parseToolCallsFromText(text string) ([]ToolCall, string) {
+	// Format 0: <tool_call> XML-style (Qoder native when native tools disabled)
+	xmlMatches := xmlToolCallRe.FindAllStringSubmatchIndex(text, -1)
+	if len(xmlMatches) > 0 {
+		var calls []ToolCall
+		for _, xmlMatch := range xmlMatches {
+			xmlString := text[xmlMatch[2]:xmlMatch[3]]
+			var obj map[string]interface{}
+			if json.Unmarshal([]byte(xmlString), &obj) == nil {
+				if name, ok := obj["name"].(string); ok && name != "" {
+					var argsJSON string
+					switch a := obj["arguments"].(type) {
+					case string:
+						argsJSON = a
+					case nil:
+						argsJSON = "{}"
+					default:
+						b, _ := json.Marshal(a)
+						argsJSON = string(b)
+					}
+					if argsJSON == "" {
+						argsJSON = "{}"
+					}
+					calls = append(calls, ToolCall{
+						ID:       generateCallID(),
+						Type:     "function",
+						Function: ToolCallFn{Name: name, Arguments: argsJSON},
+					})
+				}
+			}
+		}
+		if len(calls) > 0 {
+			// Remove all <tool_call>...</tool_call> blocks from text
+			cleanText := xmlToolCallRe.ReplaceAllString(text, "")
+			cleanText = strings.TrimSpace(cleanText)
+			return calls, cleanText
+		}
+	}
 	// Format 1: ```json fenced block
 	blockMatch := jsonBlockRe.FindStringSubmatchIndex(text)
 
