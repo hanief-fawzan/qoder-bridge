@@ -916,7 +916,12 @@ func buildQoderRequestBody(modelKey string, messages []ChatMessage, maxTokens in
 		"aliyun_user_type": "",
 		"system":          systemText,
 		"messages":        normalized,
-		"tools":           toolsPayload(tools),
+		"tools":           []interface{}{}, // ponytail: don't send native tools to Qoder API.
+		// Qoder's native tool_call implementation doesn't populate function
+		// arguments — it emits tool_calls with arguments:"{}" empty.
+		// Instead, we inject a text-based tool protocol into the system prompt
+		// (in normalizeMessages) and parse ```json blocks from the response.
+		// This gives reliable tool calling with full arguments.
 		"parameters": map[string]interface{}{"max_tokens": maxTokens},
 		"chat_context": map[string]interface{}{
 			"chatPrompt":  "",
