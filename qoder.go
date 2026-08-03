@@ -422,13 +422,14 @@ func normalizeMessages(messages []ChatMessage, tools []ToolDef) ([]ChatMessage, 
 			continue
 		case "assistant":
 			// Serialize assistant message + any tool_calls for context continuity
-			// Format matches the tool protocol prompt: <tool_call>{"name":"...","arguments":{...}}</tool_call>
+			// Format matches the tool protocol prompt: ```json {"tool_calls": [...]}
 			parts := []string{}
 			if text != "" {
 				parts = append(parts, text)
 			}
 			if tcRaw, ok := m.Extra["tool_calls"]; ok {
 				if tcArr, ok := tcRaw.([]interface{}); ok && len(tcArr) > 0 {
+					var normalized []map[string]interface{}
 					for _, tc := range tcArr {
 						if tcMap, ok := tc.(map[string]interface{}); ok {
 							name := "unknown"
@@ -452,8 +453,15 @@ func normalizeMessages(messages []ChatMessage, tools []ToolDef) ([]ChatMessage, 
 									}
 								}
 							}
-							parts = append(parts, fmt.Sprintf("\x3ctool_call\x3e\n{\"name\":%q,\"arguments\":%s}\n\x3c/tool_call\x3e", name, args))
+							normalized = append(normalized, map[string]interface{}{
+								"name":      name,
+								"arguments": json.RawMessage(args),
+							})
 						}
+					}
+					if len(normalized) > 0 {
+						tcJSON, _ := json.Marshal(map[string]interface{}{"tool_calls": normalized})
+						parts = append(parts, "```json\n"+string(tcJSON)+"\n```")
 					}
 				}
 			}
@@ -478,33 +486,28 @@ func normalizeMessages(messages []ChatMessage, tools []ToolDef) ([]ChatMessage, 
 		}
 		toolJSON, _ := json.MarshalIndent(toolDescriptions, "", "  ")
 		fence := "```"
-		lt := "\x3c"
-		gt := "\x3e"
 		toolPrompt := "[CRITICAL: Tool Calling Protocol]\n\n" +
 			"You have access to these tools:\n" + string(toolJSON) + "\n\n" +
 			"TOOL CALLING RULES — FOLLOW EXACTLY:\n" +
-			"1. When you need to use a tool, you MUST call it using <tool_call> format:\n\n" +
-			lt + "tool_call" + gt + "\n" +
-			"{\"name\": \"tool_name\", \"arguments\": {\"param1\": \"value1\"}}\n" +
-			lt + "/tool_call" + gt + "\n\n" +
-			"You may also use a " + fence + "json block:\n" +
+			"1. When you need to use a tool, you MUST output a JSON code block:\n\n" +
 			fence + "json\n" +
 			"{\"tool_calls\": [{\"name\": \"tool_name\", \"arguments\": {\"param1\": \"value1\"}}]}\n" +
 			fence + "\n\n" +
-			"2. You may include reasoning text BEFORE the tool call, but the tool call MUST be the LAST thing you output.\n" +
+			"2. You may include reasoning text BEFORE the JSON block, but the JSON block MUST be the LAST thing you output.\n" +
 			"3. You MUST use the EXACT tool names listed above. NEVER rename or substitute tool names.\n" +
 			"4. You MUST provide ALL required parameters with real values.\n" +
-			"5. For multiple tool calls, output multiple <tool_call> blocks in sequence.\n" +
+			"5. For multiple tool calls, put them all in one " + fence + "json" + fence + " block.\n" +
 			"6. NEVER describe what you would do — just call the tool directly.\n" +
 			"7. NEVER say you don't have access to tools — you ALWAYS have access to the tools listed above.\n" +
 			"8. If no tool is needed, respond with normal text.\n\n" +
-			"EXAMPLES:\n\n" +
-			"Reading a file:\n" +
-			lt + "tool_call" + gt + "\n{\"name\": \"read_file\", \"arguments\": {\"path\": \"/etc/hostname\"}}\n" +
-			lt + "/tool_call" + gt + "\n\n" +
-			"Running a command:\n" +
-			lt + "tool_call" + gt + "\n{\"name\": \"terminal\", \"arguments\": {\"command\": \"ls -la\"}}\n" +
-			lt + "/tool_call" + gt + "\n"
+			"EXAMPLE — Reading a file:\n" +
+			fence + "json\n" +
+			"{\"tool_calls\": [{\"name\": \"read_file\", \"arguments\": {\"path\": \"/etc/hostname\"}}]}\n" +
+			fence + "\n\n" +
+			"EXAMPLE — Running a command:\n" +
+			fence + "json\n" +
+			"{\"tool_calls\": [{\"name\": \"terminal\", \"arguments\": {\"command\": \"ls -la\"}}]}\n" +
+			fence
 		systemParts = append([]string{toolPrompt}, systemParts...)
 	}
 

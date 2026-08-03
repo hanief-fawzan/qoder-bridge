@@ -868,7 +868,7 @@ func TestNormalizeMessages_PreservesToolResultChain(t *testing.T) {
 	if len(out) != 3 {
 		t.Fatalf("expected 3 messages (user, assistant+tool, tool-result), got %d", len(out))
 	}
-	// Check assistant has tool_calls in <tool_call> format
+	// Check assistant has tool_calls in ```json format
 	aMsg, ok := out[1].Content.(string)
 	if !ok {
 		t.Fatal("assistant content should be string")
@@ -876,8 +876,8 @@ func TestNormalizeMessages_PreservesToolResultChain(t *testing.T) {
 	if !strings.Contains(aMsg, "read_file") {
 		t.Error("assistant msg should contain tool call name")
 	}
-	if !strings.Contains(aMsg, "tool_call") {
-		t.Error("assistant msg should have tool_call format")
+	if !strings.Contains(aMsg, "```json") {
+		t.Error("assistant msg should have ```json fence")
 	}
 }
 
