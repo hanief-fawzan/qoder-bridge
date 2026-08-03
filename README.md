@@ -1,118 +1,117 @@
-# Qoder CLI Auto Auth
+# qoder-bridge
 
-Automasi login/logout Qoder CLI dengan Google SSO tanpa perlu buka browser manual.
+OpenAI-compatible proxy for Qoder API. Translates standard `/v1/chat/completions` requests into Qoder's proprietary wire format, enabling any OpenAI-compatible client to use Qoder models.
 
-## Fitur
+## What It Does
 
-- ✓ Auto-install Qoder CLI jika belum ada
-- ✓ Otomatisasi Google OAuth login
-- ✓ Handle semua consent screens (bahasa Indonesia & English)
-- ✓ Logout otomatis
-- ✓ Mode test (login lalu logout)
+    Client (OpenAI format) -> qoder-bridge -> Qoder API (COSY format)
+                      <- OpenAI SSE response <-
 
-## Persyaratan
+- Transparent proxy with COSY signing, WAF encoding, PAT rotation
+- Text-based tool calling with multi-format parser
+- Multi-PAT rotation with cooldown on quota errors
+- Combo models: named groups that cascade through tiers
+- SOCKS5/HTTP proxy support
+- TUI management for PATs, API keys, usage, combos, proxy
+- API key auth with global toggle
+- Graceful shutdown with connection drain
 
-- **Windows 10/11**
-- **Python 3.8+** - [Download](https://www.python.org/downloads/)
-- **Node.js** - [Download](https://nodejs.org/) (untuk qodercli)
+## Quick Start
 
-## Cara Pakai
+    # 1. Configure
+    cp .env.example .env
+    # Add your PATs: pt-xxx, pt-yyy (one per line)
 
-### 1. Setup (Pertama Kali)
+    # 2. Build and run
+    go build -o qoder-bridge .
+    ./qoder-bridge run
 
-Double-click `setup.bat` atau jalankan:
+    # Or install as systemd service
+    bash install.sh restart
 
-```cmd
-setup.bat
-```
+## Configuration (.env)
 
-Ini akan:
-- Install dependencies Python
-- Install Playwright browser (Chromium)
+    # PATs (one per line, minimum 1)
+    pt-your-pat-here
+    pt-second-pat-here
 
-### 2. Jalankan
+    # Proxy (optional, SOCKS5 or HTTP)
+    QODER_PROXY=socks5://user:pass@127.0.0.1:1080
 
-Double-click `run.bat` atau jalankan:
+    # Port (default: 7100)
+    QODER_PORT=7101
 
-```cmd
-run.bat
-```
+## API Endpoints
 
-### 3. Ikuti Prompt
+| Endpoint | Description |
+|----------|-------------|
+| POST /v1/chat/completions | Chat completions (OpenAI-compatible) |
+| GET /v1/models | List available models |
+| GET /v1/status | Server status, PAT health, egress IP |
+| GET /v1/quota | PAT quota usage |
+| GET /v1/combos | List combo model configurations |
+| GET /health | Health check |
 
-Program akan minta:
-1. **Google Email** - Email Google kamu
-2. **Google Password** - Password Google kamu
-3. **Pilihan**:
-   - `1` - Login saja
-   - `2` - Logout saja
-   - `3` - Login lalu logout (test)
+## Model Routing
 
-## Cara Kerja
+| Prefix | Behavior |
+|--------|----------|
+| qd/auto | Auto-select best model |
+| qd/ultimate, qd/performance, etc. | Specific Qoder tier |
+| cheap, daily, etc. | Combo: cascade through model list |
+| Any model string | Pass-through to upstream |
 
-```
-1. Cek apakah qodercli sudah terinstall
-   └─ Jika belum → install via npm
+## Features
 
-2. Jalankan `qodercli login`
-   └─ Capture URL login dari output
+### Tool Calling
 
-3. Buka browser otomatis (Playwright)
-   └─ Navigate ke URL login
-   └─ Klik "Sign in with Google"
-   └─ Input email & password
-   └─ Handle consent screens
-   └─ Complete OAuth flow
+Bridge converts OpenAI tools schema into text-based tool protocol injected into system prompt.
+Qoder model generates tool calls in various text formats. Bridge parses and emits proper
+OpenAI tool_calls format with finish_reason: tool_calls.
 
-4. qodercli terima token → login selesai!
-```
+Supported parser formats (priority order):
+1. Fenced JSON blocks (primary)
+2. XML-style tool_call tags
+3. Anthropic XML function_calls/invoke format
+4. Bare JSON with brace-counting extraction (fallback)
+5. Inline text format (last resort)
 
-## Environment Variables (Optional)
+### Streaming
 
-Bisa set credentials via environment variable:
+Full SSE streaming with stream_options.include_usage, finish_reason variants,
+panic recovery, and context cancellation on client disconnect.
 
-```cmd
-set QODER_GOOGLE_EMAIL=your.email@gmail.com
-set QODER_GOOGLE_PASSWORD=yourpassword
-run.bat
-```
+### PAT Rotation
 
-## Troubleshooting
+Round-robin with cooldown: 403 code 112 -> 5min, queue/rate-limit -> 2min, 401 -> not retryable.
 
-### "Qoder CLI not found"
-- Pastikan Node.js terinstall
-- Install manual: `npm install -g @qoder-ai/qodercli`
+### Combo Models
 
-### "Playwright not found"
-- Jalankan: `pip install playwright`
-- Lalu: `python -m playwright install chromium`
+Named model groups configured via TUI. Bridge tries each model in order:
+  cheap:    qd/efficiency -> qd/auto
+  daily:    qd/auto -> qd/performance
+  default:  qd/auto
 
-### Login gagal
-- Cek email & password benar
-- Pastikan tidak ada 2FA (atau handle manual jika ada)
-- Coba mode visible (bukan headless) - default sudah visible
+## TUI
 
-### Browser tidak muncul
-- Pastikan Playwright terinstall dengan benar
-- Jalankan: `python -m playwright install chromium`
+Run ./qoder-bridge without arguments for interactive TUI:
+- PAT management (add/remove/list)
+- API key management (generate/toggle/table view)
+- Usage statistics with per-PAT breakdown and average latency
+- Combo model configuration
+- Proxy configuration
 
-## File Structure
+## Build
 
-```
-qoder-bridge/
-├── qoder_auto_auth.py    # Script utama
-├── requirements.txt      # Python dependencies
-├── setup.bat            # Setup script
-├── run.bat              # Launcher
-└── README.md            # Dokumentasi ini
-```
+    # Standard
+    go build -o qoder-bridge .
 
-## Catatan Penting
+    # Optimized (production)
+    go build -trimpath -ldflags="-s -w" -o qoder-bridge .
 
-- **Keamanan**: Script ini butuh password Google kamu. Pastikan hanya dijalankan di komputer pribadi.
-- **2FA**: Jika akun Google kamu pakai 2FA, mungkin perlu handle manual.
-- **Token**: Setelah login sukses, token disimpan di `~/.qoder/.auth/` dan bisa dipakai sampai expired.
+    # Tests
+    go test -race -count=1 ./...
 
 ## License
 
-MIT - Pakai sesuka hati.
+MIT
