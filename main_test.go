@@ -914,6 +914,23 @@ func TestNormalizeMessages_HandlesObjectArguments(t *testing.T) {
 	}
 }
 
+func TestParseAnthropicXMLToolCalls(t *testing.T) {
+	input := "I need to run pwd.\n\n\x3cfunction_calls\x3e\n\x3cinvoke name=\"terminal\"\x3e\n\x3cparameter name=\"command\"\x3epwd\x3c/parameter\x3e\n\x3c/invoke\x3e\n\x3c/function_calls\x3e"
+	calls, clean := parseToolCallsFromText(input)
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 tool call, got %d", len(calls))
+	}
+	if calls[0].Function.Name != "terminal" {
+		t.Errorf("expected name terminal, got %q", calls[0].Function.Name)
+	}
+	if !strings.Contains(calls[0].Function.Arguments, "pwd") {
+		t.Errorf("expected pwd in arguments, got %q", calls[0].Function.Arguments)
+	}
+	if !strings.Contains(clean, "run pwd") {
+		t.Errorf("prefix text should be preserved, got %q", clean)
+	}
+}
+
 func TestRecoverPanicSendsErrorChunk(t *testing.T) {
 	// After SSE headers are sent, a panic in the handler must NOT leave
 	// the client hanging. recoverPanic must emit a final error chunk +

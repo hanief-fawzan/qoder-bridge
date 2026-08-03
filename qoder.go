@@ -596,6 +596,12 @@ var xmlToolCallRe = regexp.MustCompile(`(?s)\x3ctool_call\x3e\s*\n?([\s\S]*?)\n?
 // bracket counting to handle nested arrays/objects.
 var inlineToolCallRe = regexp.MustCompile(`\[assistant called tool: (\S+) with arguments: `)
 
+// Regex for Anthropic/Claude XML-style function calls:
+// <function_calls><invoke name="tool"><parameter name="param">val</parameter></invoke></function_calls>
+var anthropicXMLRe = regexp.MustCompile(`(?s)\x3cfunction_calls\x3e([\s\S]*?)\x3c/function_calls\x3e`)
+var anthropicInvokeRe = regexp.MustCompile(`(?s)\x3cinvoke name="([^"]*)"\x3e([\s\S]*?)\x3c/invoke\x3e`)
+var anthropicParamRe = regexp.MustCompile(`(?s)\x3cparameter name="([^"]*)"\x3e([\s\S]*?)\x3c/parameter\x3e`)
+
 // parseToolCallsFromText extracts tool_calls from Qoder text response.
 // Handles three formats in priority order:
 //  1. ```json\n{"tool_calls": [...]}\n```  (preferred, matching qoder-proxy)
@@ -636,6 +642,46 @@ func parseToolCallsFromText(text string) ([]ToolCall, string) {
 		if len(calls) > 0 {
 			// Remove all <tool_call>...</tool_call> blocks from text
 			cleanText := xmlToolCallRe.ReplaceAllString(text, "")
+			cleanText = strings.TrimSpace(cleanText)
+			return calls, cleanText
+		}
+	}
+	// Format 0b: Anthropic/Claude XML-style <function_calls><invoke>...</function_calls>
+	// Model sometimes emits this when confused about tool protocol.
+	anthroMatches := anthropicXMLRe.FindAllStringSubmatchIndex(text, -1)
+	if len(anthroMatches) > 0 {
+		var calls []ToolCall
+		for _, am := range anthroMatches {
+			inner := text[am[2]:am[3]]
+			invokes := anthropicInvokeRe.FindAllStringSubmatch(inner, -1)
+			for _, inv := range invokes {
+				if len(inv) < 3 {
+					continue
+				}
+				name := inv[1]
+				paramBlock := inv[2]
+				params := anthropicParamRe.FindAllStringSubmatch(paramBlock, -1)
+				args := make(map[string]string)
+				for _, p := range params {
+					if len(p) >= 3 {
+						args[p[1]] = p[2]
+					}
+				}
+				argsJSON := "{}"
+				if len(args) > 0 {
+					if b, err := json.Marshal(args); err == nil {
+						argsJSON = string(b)
+					}
+				}
+				calls = append(calls, ToolCall{
+					ID:       generateCallID(),
+					Type:     "function",
+					Function: ToolCallFn{Name: name, Arguments: argsJSON},
+				})
+			}
+		}
+		if len(calls) > 0 {
+			cleanText := anthropicXMLRe.ReplaceAllString(text, "")
 			cleanText = strings.TrimSpace(cleanText)
 			return calls, cleanText
 		}
