@@ -2008,14 +2008,27 @@ func runServe(args []string) {
 	// Handle graceful shutdown
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,  // slowloris protection
+		WriteTimeout:      0,                 // SSE streams can run indefinitely
+		IdleTimeout:       120 * time.Second, // close idle keep-alive connections
+		MaxHeaderBytes:    1 << 20,           // 1MB max header
+	}
+
 	go func() {
 		sig := <-sigCh
 		log.Printf("received %v, shutting down...", sig)
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		srv.Shutdown(ctx) // drain active connections
 		removePID()
 		os.Exit(0)
 	}()
 
-	if err := http.ListenAndServe(addr, mux); err != nil {
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("listen: %v", err)
 	}
 }
