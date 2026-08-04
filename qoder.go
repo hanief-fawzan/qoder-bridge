@@ -910,7 +910,9 @@ func extractBalancedJsonWithToolCalls(text string) *balancedExtract {
 		}
 
 		candidate := text[start : end+1]
-		if !strings.Contains(candidate, `"tool_calls"`) {
+		if !strings.Contains(candidate, `"tool_calls"`) &&
+			!strings.Contains(candidate, `"name"`) &&
+			!strings.Contains(candidate, `"tool"`) {
 			continue
 		}
 
