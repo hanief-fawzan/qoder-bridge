@@ -509,6 +509,25 @@ func normalizeMessages(messages []ChatMessage, tools []ToolDef) ([]ChatMessage, 
 			"{\"tool_calls\": [{\"name\": \"terminal\", \"arguments\": {\"command\": \"ls -la\"}}]}\n" +
 			fence
 		systemParts = append([]string{toolPrompt}, systemParts...)
+
+	// Append compact tool reminder to last user message.
+	// Models that skim system prompt but read user messages will see this.
+	for i := len(out) - 1; i >= 0; i-- {
+		if out[i].Role == "user" {
+			toolList := ""
+			for _, t := range tools {
+				if toolList != "" {
+					toolList += ", "
+				}
+				toolList += t.Function.Name
+			}
+			out[i].Content = extractText(out[i].Content) +
+				"\n\n[Available tools: " + toolList + "] " +
+				"Respond with a ```json code block containing {\"tool_calls\": [{\"name\": \"...\", \"arguments\": {...}}]}. " +
+				"NEVER say you don't have tools."
+			break
+		}
+	}
 	}
 
 	return out, strings.Join(systemParts, "\n\n")

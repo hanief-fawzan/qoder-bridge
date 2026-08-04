@@ -1350,7 +1350,34 @@ func runWithPATRotation(ctx context.Context, pool *PATPool, modelKey string, mes
 		}
 		result, lastErr = callQoder(ctx, pat, modelKey, messages, maxTokens, callback, tools, thinkingEffort, contextWindow)
 		if lastErr == nil && result != nil && (strings.TrimSpace(result.Text) != "" || len(result.ToolCalls) > 0) {
-			goto done
+			// Auto-retry: tools requested but model responded text-only.
+			// Inject a stronger user reminder and retry once with same PAT.
+			if len(tools) > 0 && len(result.ToolCalls) == 0 && !emitted {
+				log.Printf("qd %s: text-only response despite tools — retrying with stronger injection", modelKey)
+				retryMsgs := make([]ChatMessage, len(messages))
+				copy(retryMsgs, messages)
+				toolList := ""
+				for _, t := range tools {
+					if toolList != "" {
+						toolList += ", "
+					}
+					toolList += t.Function.Name
+				}
+				// Append strong retry message
+				retryMsgs = append(retryMsgs, ChatMessage{
+					Role:    "user",
+					Content: "You MUST call one of these tools NOW: [" + toolList + "]. " +
+						"Output ONLY a ```json block with {\"tool_calls\": [{\"name\": \"...\", \"arguments\": {...}}]}. " +
+						"Do NOT explain. Do NOT say you don't have tools. Just output the JSON block.",
+				})
+				result, lastErr = callQoder(ctx, pat, modelKey, retryMsgs, maxTokens, callback, tools, thinkingEffort, contextWindow)
+				if lastErr == nil && result != nil && len(result.ToolCalls) > 0 {
+					log.Printf("qd %s: retry succeeded — got %d tool_calls", modelKey, len(result.ToolCalls))
+				}
+			}
+			if lastErr == nil && result != nil && (strings.TrimSpace(result.Text) != "" || len(result.ToolCalls) > 0) {
+				goto done
+			}
 		}
 		if lastErr == nil {
 			lastErr = fmt.Errorf("empty response from upstream")
