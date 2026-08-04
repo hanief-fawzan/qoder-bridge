@@ -931,6 +931,51 @@ func TestParseAnthropicXMLToolCalls(t *testing.T) {
 	}
 }
 
+func TestParseBareObjectToolCall(t *testing.T) {
+	// Model emits bare object without tool_calls wrapper
+	input := "```json\n{\"name\": \"terminal\", \"arguments\": {\"command\": \"echo hello\"}}\n```"
+	calls, _ := parseToolCallsFromText(input)
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 tool call, got %d", len(calls))
+	}
+	if calls[0].Function.Name != "terminal" {
+		t.Errorf("expected name terminal, got %q", calls[0].Function.Name)
+	}
+	if !strings.Contains(calls[0].Function.Arguments, "echo hello") {
+		t.Errorf("expected echo hello in args, got %q", calls[0].Function.Arguments)
+	}
+}
+
+func TestParseToolParameterFieldNames(t *testing.T) {
+	// Some models use "tool"/"parameters" instead of "name"/"arguments"
+	input := "```json\n{\"tool\": \"write_file\", \"parameters\": {\"path\": \"/tmp/f\", \"content\": \"hi\"}}\n```"
+	calls, _ := parseToolCallsFromText(input)
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 tool call, got %d", len(calls))
+	}
+	if calls[0].Function.Name != "write_file" {
+		t.Errorf("expected name write_file, got %q", calls[0].Function.Name)
+	}
+	if !strings.Contains(calls[0].Function.Arguments, "/tmp/f") {
+		t.Errorf("expected /tmp/f in args, got %q", calls[0].Function.Arguments)
+	}
+}
+
+func TestParseMultipleBareObjects(t *testing.T) {
+	// Array of bare objects
+	input := "```json\n[{\"name\": \"read_file\", \"arguments\": {\"path\": \"/tmp/a\"}}, {\"name\": \"terminal\", \"arguments\": {\"command\": \"ls\"}}]\n```"
+	calls, _ := parseToolCallsFromText(input)
+	if len(calls) != 2 {
+		t.Fatalf("expected 2 tool calls, got %d", len(calls))
+	}
+	if calls[0].Function.Name != "read_file" {
+		t.Errorf("expected read_file, got %q", calls[0].Function.Name)
+	}
+	if calls[1].Function.Name != "terminal" {
+		t.Errorf("expected terminal, got %q", calls[1].Function.Name)
+	}
+}
+
 func TestRecoverPanicSendsErrorChunk(t *testing.T) {
 	// After SSE headers are sent, a panic in the handler must NOT leave
 	// the client hanging. recoverPanic must emit a final error chunk +

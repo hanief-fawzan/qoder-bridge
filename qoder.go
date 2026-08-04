@@ -933,18 +933,57 @@ func parseToolCallsJSON(jsonStr string) ([]map[string]interface{}, error) {
 		ToolCalls []map[string]interface{} `json:"tool_calls"`
 	}
 	if err := json.Unmarshal([]byte(jsonStr), &withKey); err == nil && len(withKey.ToolCalls) > 0 {
-		return withKey.ToolCalls, nil
+		return normalizeToolCallEntries(withKey.ToolCalls)
 	}
 
 	// Try bare array [...]
 	var arr []map[string]interface{}
 	if err := json.Unmarshal([]byte(jsonStr), &arr); err == nil && len(arr) > 0 {
-		if _, hasName := arr[0]["name"]; hasName {
-			return arr, nil
+		return normalizeToolCallEntries(arr)
+	}
+
+	// Try bare object {"name": "tool", "arguments": {...}} or {"tool": "tool", "parameters": {...}}
+	var obj map[string]interface{}
+	if err := json.Unmarshal([]byte(jsonStr), &obj); err == nil {
+		name, _ := obj["name"].(string)
+		if name == "" {
+			name, _ = obj["tool"].(string)
+		}
+		if name != "" {
+			return normalizeToolCallEntries([]map[string]interface{}{obj})
 		}
 	}
 
 	return nil, fmt.Errorf("no tool_calls found")
+}
+
+// normalizeToolCallEntries fixes field name variations across models.
+// Some models use "tool"/"parameters" instead of "name"/"arguments".
+func normalizeToolCallEntries(entries []map[string]interface{}) ([]map[string]interface{}, error) {
+	var result []map[string]interface{}
+	for _, e := range entries {
+		// Normalize name: "name" or "tool"
+		name, _ := e["name"].(string)
+		if name == "" {
+			name, _ = e["tool"].(string)
+		}
+		if name == "" {
+			continue
+		}
+		e["name"] = name
+
+		// Normalize arguments: "arguments" or "parameters"
+		if _, ok := e["arguments"]; !ok {
+			if params, ok := e["parameters"]; ok {
+				e["arguments"] = params
+			}
+		}
+		result = append(result, e)
+	}
+	if len(result) == 0 {
+		return nil, fmt.Errorf("no valid tool_calls after normalization")
+	}
+	return result, nil
 }
 
 // generateCallID creates an OpenAI-compatible call ID (24 hex chars).
