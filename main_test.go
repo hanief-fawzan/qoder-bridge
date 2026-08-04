@@ -976,6 +976,46 @@ func TestParseMultipleBareObjects(t *testing.T) {
 	}
 }
 
+
+func TestParseKimiToolFormat(t *testing.T) {
+	input := "I'll run that command for you.\n\n<Tool>terminal</Tool>"
+	calls, clean := parseToolCallsFromText(input)
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 tool call, got %d", len(calls))
+	}
+	if calls[0].Function.Name != "terminal" {
+		t.Errorf("expected name terminal, got %q", calls[0].Function.Name)
+	}
+	if !strings.Contains(clean, "run that command") {
+		t.Errorf("prefix text should be preserved, got %q", clean)
+	}
+}
+
+func TestParseFourBacktickFence(t *testing.T) {
+	input := "````json\n{\"name\": \"terminal\", \"arguments\": {\"command\": \"echo hello\"}}\n````"
+	calls, _ := parseToolCallsFromText(input)
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 tool call, got %d", len(calls))
+	}
+	if calls[0].Function.Name != "terminal" {
+		t.Errorf("expected name terminal, got %q", calls[0].Function.Name)
+	}
+}
+
+func TestParseMultipleKimiTools(t *testing.T) {
+	input := "I'll do both:\n\n<Tool>read_file</Tool> and <Tool>terminal</Tool>"
+	calls, _ := parseToolCallsFromText(input)
+	if len(calls) != 2 {
+		t.Fatalf("expected 2 tool calls, got %d", len(calls))
+	}
+	if calls[0].Function.Name != "read_file" {
+		t.Errorf("expected read_file, got %q", calls[0].Function.Name)
+	}
+	if calls[1].Function.Name != "terminal" {
+		t.Errorf("expected terminal, got %q", calls[1].Function.Name)
+	}
+}
+
 func TestRecoverPanicSendsErrorChunk(t *testing.T) {
 	// After SSE headers are sent, a panic in the handler must NOT leave
 	// the client hanging. recoverPanic must emit a final error chunk +

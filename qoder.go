@@ -584,8 +584,8 @@ func truncate(s string, n int) string {
 }
 
 // Regex for ```json ... ``` blocks — compiled once at package level.
-// Supports: ```json, ```, ```tool_call, ```function_call — with or without newline after tag.
-var jsonBlockRe = regexp.MustCompile("(?s)" + "`" + "`" + "`" + `(?:json|tool_call|function_call)?\s*\n?([\s\S]*?)\n?\s*` + "`" + "`" + "`")
+// Supports: ```, ````, `````+ backticks. Also handles json, tool_call, function_call tags.
+var jsonBlockRe = regexp.MustCompile("(?s)" + "`{3,}" + `(?:json|tool_call|function_call)?\s*\n?([\s\S]*?)\n?\s*` + "`{3,}")
 
 // Regex for <tool_call>...</tool_call> XML-style tool calls.
 // Model may emit: <tool_call>\n{"name":"terminal","arguments":{"command":"pwd"}}\n</tool_call>
@@ -601,6 +601,10 @@ var inlineToolCallRe = regexp.MustCompile(`\[assistant called tool: (\S+) with a
 var anthropicXMLRe = regexp.MustCompile(`(?s)\x3cfunction_calls\x3e([\s\S]*?)\x3c/function_calls\x3e`)
 var anthropicInvokeRe = regexp.MustCompile(`(?s)\x3cinvoke name="([^"]*)"\x3e([\s\S]*?)\x3c/invoke\x3e`)
 var anthropicParamRe = regexp.MustCompile(`(?s)\x3cparameter name="([^"]*)"\x3e([\s\S]*?)\x3c/parameter\x3e`)
+
+// Regex for Kimi's <Tool>name</Tool> format.
+// Model may emit: "I'll run that.\n\n<Tool>terminal</Tool>"
+var kimiToolRe = regexp.MustCompile("(?s)<Tool>(\\S+?)</Tool>")
 
 // parseToolCallsFromText extracts tool_calls from Qoder text response.
 // Handles three formats in priority order:
@@ -682,6 +686,24 @@ func parseToolCallsFromText(text string) ([]ToolCall, string) {
 		}
 		if len(calls) > 0 {
 			cleanText := anthropicXMLRe.ReplaceAllString(text, "")
+			cleanText = strings.TrimSpace(cleanText)
+			return calls, cleanText
+		}
+	}
+	// Format 0c: Kimi's <Tool>name</Tool> format
+	// Model may emit: "I'll run that.\n\n<Tool>terminal</Tool>"
+	if kimiMatches := kimiToolRe.FindAllStringSubmatch(text, -1); len(kimiMatches) > 0 {
+		var calls []ToolCall
+		for _, m := range kimiMatches {
+			if len(m) < 2 { continue }
+			name := m[1]
+			calls = append(calls, ToolCall{
+				ID: generateCallID(), Type: "function",
+				Function: ToolCallFn{Name: name, Arguments: "{}"},
+			})
+		}
+		if len(calls) > 0 {
+			cleanText := kimiToolRe.ReplaceAllString(text, "")
 			cleanText = strings.TrimSpace(cleanText)
 			return calls, cleanText
 		}
