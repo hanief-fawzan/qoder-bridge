@@ -229,7 +229,7 @@ func ensureModelConfig(cred *patCredential, modelKey string) *modelConfig {
 		return &modelConfig{
 			Key:             modelKey,
 			IsReasoning:     false,
-			MaxOutputTokens: 65536,
+			MaxOutputTokens: 32768,
 			Source:          "",
 			Raw:             nil,
 		}
@@ -1055,10 +1055,16 @@ func buildQoderRequestBody(modelKey string, messages []ChatMessage, maxTokens in
 	recordID := stableChatRecordID(modelKey, messages, maxTokens)
 
 	if maxTokens <= 0 {
-		maxTokens = 65536
+		maxTokens = 32768
 	}
 	if mc.MaxOutputTokens > 0 && mc.MaxOutputTokens < maxTokens {
 		maxTokens = mc.MaxOutputTokens
+	}
+	// ponytail: Qoder API hard limit is 32768 for all models.
+	// Some clients send huge values — cap to prevent 400 errors.
+	const qoderMaxTokens = 32768
+	if maxTokens > qoderMaxTokens {
+		maxTokens = qoderMaxTokens
 	}
 
 	payload := map[string]interface{}{
