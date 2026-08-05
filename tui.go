@@ -316,25 +316,29 @@ func apiKeyMenu() tview.Primitive {
 		pages.RemovePage("sub")
 		pushPage("sub", apiKeyMenu())
 	})
-	list.AddItem("  Generate New Key", "Create named sk-* key", 'g', func() {
+	list.AddItem("  Generate New Key", "Create named sk-* key with permissions", 'g', func() {
 		showInput("Key name", "hermes-desktop", func(name string) {
 			if name == "" {
 				name = "generated"
 			}
-			b := make([]byte, 24)
-			rand.Read(b)
-			newKey := "sk-" + hex.EncodeToString(b)
-			if err := addAPIKey(name, newKey); err != nil {
-				showMsg(fmt.Sprintf("%s❌ Failed:%s\n%v", colorRed, colorReset, err), "apikey", apiKeyMenu)
-				return
-			}
-			// Auto-enable the master toggle so the freshly-issued key is
-			// actually required. Users generating a credential expect the
-			// bridge to start demanding it.
-			setGlobalAuth(true)
-			showMsg(fmt.Sprintf("%s✅ Generated key [%s]:%s\n%s\n\nGlobal auth toggled ON — this key is now required.\nCopy this key now — it won't be shown again in full.", colorGreen, name, colorReset, newKey), "apikey", apiKeyMenu)
-			pages.RemovePage("sub")
-			pushPage("sub", apiKeyMenu())
+			// Show permission checkboxes
+			showPermForm(name, func(perms string) {
+				b := make([]byte, 24)
+				rand.Read(b)
+				newKey := "sk-" + hex.EncodeToString(b)
+				if err := addAPIKey(name, newKey, perms); err != nil {
+					showMsg(fmt.Sprintf("%s❌ Failed:%s\n%v", colorRed, colorReset, err), "apikey", apiKeyMenu)
+					return
+				}
+				setGlobalAuth(true)
+				permLabel := "all"
+				if perms != "" {
+					permLabel = perms
+				}
+				showMsg(fmt.Sprintf("%s✅ Generated key [%s]:%s\n%s\n\nPermissions: %s\nAuth toggled ON.", colorGreen, name, colorReset, newKey, permLabel), "apikey", apiKeyMenu)
+				pages.RemovePage("sub")
+				pushPage("sub", apiKeyMenu())
+			})
 		})
 	})
 	list.AddItem("  View & Manage Keys", fmt.Sprintf("%d key(s) — Enter to view, toggle, delete", len(keys)), 'v', func() {
@@ -351,7 +355,7 @@ func apiKeyTableView() tview.Primitive {
 	t := tview.NewTable().SetFixed(1, 0).SetSelectable(true, false)
 	t.SetBorder(true).SetTitle(colorTitle + " API Keys — Enter to select " + colorReset).SetTitleAlign(tview.AlignCenter)
 
-	headers := []string{"ID", "Name", "Key", "Status", "Created"}
+	headers := []string{"ID", "Name", "Key", "Status", "Perms", "Created"}
 	for i, h := range headers {
 		t.SetCell(0, i, tview.NewTableCell(h).SetTextColor(tcell.ColorYellow).SetSelectable(false).SetExpansion(1))
 	}
@@ -372,11 +376,16 @@ func apiKeyTableView() tview.Primitive {
 			status = colorGreen + "enabled" + colorReset
 		}
 		masked := k.APIKey[:min(8, len(k.APIKey))] + "..." + k.APIKey[max(0, len(k.APIKey)-4):]
+		permLabel := k.Permissions
+		if permLabel == "" {
+			permLabel = colorGreen + "all" + colorReset
+		}
 		t.SetCell(i+1, 0, tview.NewTableCell(fmt.Sprintf("%d", k.ID)).SetExpansion(1))
 		t.SetCell(i+1, 1, tview.NewTableCell(k.Name).SetExpansion(2))
 		t.SetCell(i+1, 2, tview.NewTableCell(masked).SetExpansion(3))
 		t.SetCell(i+1, 3, tview.NewTableCell(status).SetExpansion(1))
-		t.SetCell(i+1, 4, tview.NewTableCell(formatTS(k.CreatedAt)).SetExpansion(2))
+		t.SetCell(i+1, 4, tview.NewTableCell(permLabel).SetExpansion(2))
+		t.SetCell(i+1, 5, tview.NewTableCell(formatTS(k.CreatedAt)).SetExpansion(2))
 	}
 
 	// Enter to select a row → show key detail with toggle/copy/delete
@@ -397,15 +406,30 @@ func apiKeyTableView() tview.Primitive {
 		detail.AddItem(fmt.Sprintf("  Name: %s", k.Name), "", 0, nil)
 		detail.AddItem(fmt.Sprintf("  Key:  %s", k.APIKey), colorDim+"(full key visible)"+colorReset, 0, nil)
 		detail.AddItem(fmt.Sprintf("  Status: %s%s", status, colorReset), "", 0, nil)
+		permLabel := k.Permissions
+		if permLabel == "" {
+			permLabel = "all"
+		}
+		detail.AddItem(fmt.Sprintf("  Perms: %s", permLabel), "", 0, nil)
 		detail.AddItem(toggleLabel, "Toggle enable/disable", 't', func() {
 			if err := toggleAPIKey(k.ID, !k.Enabled); err != nil {
 				showMsg(fmt.Sprintf("%s❌ Error:%s\n%v", colorRed, colorReset, err), "apikey", func() tview.Primitive { return apiKeyTableView() })
 				return
 			}
-			// Rebuild both views
 			pages.RemovePage("detail")
 			pages.RemovePage("sub")
 			pushPage("sub", apiKeyTableView())
+		})
+		detail.AddItem("  🔐  Edit Permissions", "Restrict which endpoints this key can access", 'p', func() {
+			showPermForm(k.Name, func(perms string) {
+				if err := updatePermissions(k.ID, perms); err != nil {
+					showMsg(fmt.Sprintf("%s❌ Error:%s\n%v", colorRed, colorReset, err), "apikey", func() tview.Primitive { return apiKeyTableView() })
+					return
+				}
+				pages.RemovePage("detail")
+				pages.RemovePage("sub")
+				pushPage("sub", apiKeyTableView())
+			})
 		})
 		detail.AddItem("  🗑  Delete", "Remove this key permanently", 'd', func() {
 			if err := removeAPIKey(k.ID); err != nil {
@@ -419,10 +443,55 @@ func apiKeyTableView() tview.Primitive {
 		detail.AddItem("  ← Back", "Esc", 'b', func() { pages.RemovePage("detail") })
 		detail.SetBorder(true).SetTitle(fmt.Sprintf(colorTitle+" Key: %s ", k.Name)).SetTitleAlign(tview.AlignCenter)
 		wireEsc(detail)
-		pages.AddAndSwitchToPage("detail", wrapWithHint(detail, fmt.Sprintf("%st%s toggle   %sd%s delete   %sEsc%s back", colorKey, colorReset, colorKey, colorReset, colorKey, colorReset)), true)
+		pages.AddAndSwitchToPage("detail", wrapWithHint(detail, fmt.Sprintf("%st%s toggle   %sp%s perms   %sd%s delete   %sEsc%s back", colorKey, colorReset, colorKey, colorReset, colorKey, colorReset, colorKey, colorReset)), true)
 	})
 
 	return wrapTable(t)
+}
+
+// allPerms lists all available permissions.
+var allPerms = []string{"chat", "models", "status", "quota", "logs", "combos"}
+
+// showPermForm shows a checkbox form for selecting permissions.
+// Empty selection = all permissions.
+func showPermForm(name string, onSubmit func(perms string)) {
+	form := tview.NewForm()
+	selected := map[string]bool{}
+	for _, p := range allPerms {
+		selected[p] = true // default: all checked
+	}
+	for _, p := range allPerms {
+		perm := p // capture
+		form.AddCheckbox(perm, true, func(checked bool) {
+			selected[perm] = checked
+		})
+	}
+	form.AddButton("OK", func() {
+		var chosen []string
+		for _, p := range allPerms {
+			if selected[p] {
+				chosen = append(chosen, p)
+			}
+		}
+		perms := ""
+		if len(chosen) < len(allPerms) {
+			perms = strings.Join(chosen, ",")
+		}
+		pages.RemovePage("perms")
+		onSubmit(perms)
+	})
+	form.AddButton("Cancel", func() {
+		pages.RemovePage("perms")
+	})
+	form.SetBorder(true).SetTitle(fmt.Sprintf(colorTitle+" Permissions for [%s] ", name)).SetTitleAlign(tview.AlignCenter)
+	form.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		if event.Key() == tcell.KeyEscape {
+			pages.RemovePage("perms")
+			return nil
+		}
+		return event
+	})
+	pages.AddAndSwitchToPage("perms", wrapWithHint(form, fmt.Sprintf("%sTab%s navigate   %sSpace%s toggle   %sEnter%s confirm", colorKey, colorReset, colorKey, colorReset, colorKey, colorReset)), true)
 }
 
 // ── Proxy ─────────────────────────────────────────────────────────────────

@@ -117,6 +117,12 @@ func migrate(d *sql.DB) error {
 			return fmt.Errorf("migrate: add api_key column: %w", err)
 		}
 	}
+	// Add permissions column to api_keys (empty = all permissions).
+	if _, err := d.Exec(`ALTER TABLE api_keys ADD COLUMN permissions TEXT DEFAULT ''`); err != nil {
+		if !strings.Contains(err.Error(), "duplicate column") {
+			return fmt.Errorf("migrate: add permissions column: %w", err)
+		}
+	}
 	return nil
 }
 
@@ -313,18 +319,19 @@ func queryUsageSummary(fromTS, toTS int64) (*UsageSummary, error) {
 // ── API Key management ─────────────────────────────────────────────────────
 
 type APIKeyEntry struct {
-	ID        int
-	Name      string
-	APIKey    string
-	Enabled   bool
-	CreatedAt int64
+	ID          int
+	Name        string
+	APIKey      string
+	Enabled     bool
+	Permissions string // comma-separated, empty = all
+	CreatedAt   int64
 }
 
 func listAPIKeys() ([]APIKeyEntry, error) {
 	if db == nil {
 		return nil, fmt.Errorf("db not initialized")
 	}
-	rows, err := db.Query(`SELECT id, name, api_key, enabled, created_at FROM api_keys ORDER BY created_at DESC`)
+	rows, err := db.Query(`SELECT id, name, api_key, enabled, permissions, created_at FROM api_keys ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -333,7 +340,7 @@ func listAPIKeys() ([]APIKeyEntry, error) {
 	for rows.Next() {
 		var k APIKeyEntry
 		var en int
-		if err := rows.Scan(&k.ID, &k.Name, &k.APIKey, &en, &k.CreatedAt); err != nil {
+		if err := rows.Scan(&k.ID, &k.Name, &k.APIKey, &en, &k.Permissions, &k.CreatedAt); err != nil {
 			continue
 		}
 		k.Enabled = en == 1
@@ -349,7 +356,7 @@ func listEnabledAPIKeys() ([]APIKeyEntry, error) {
 	if db == nil {
 		return nil, fmt.Errorf("db not initialized")
 	}
-	rows, err := db.Query(`SELECT id, name, api_key, enabled, created_at FROM api_keys WHERE enabled = 1 ORDER BY created_at DESC`)
+	rows, err := db.Query(`SELECT id, name, api_key, enabled, permissions, created_at FROM api_keys WHERE enabled = 1 ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -358,7 +365,7 @@ func listEnabledAPIKeys() ([]APIKeyEntry, error) {
 	for rows.Next() {
 		var k APIKeyEntry
 		var en int
-		if err := rows.Scan(&k.ID, &k.Name, &k.APIKey, &en, &k.CreatedAt); err != nil {
+		if err := rows.Scan(&k.ID, &k.Name, &k.APIKey, &en, &k.Permissions, &k.CreatedAt); err != nil {
 			continue
 		}
 		k.Enabled = true
@@ -367,12 +374,12 @@ func listEnabledAPIKeys() ([]APIKeyEntry, error) {
 	return out, nil
 }
 
-func addAPIKey(name, key string) error {
+func addAPIKey(name, key, permissions string) error {
 	if db == nil {
 		return fmt.Errorf("db not initialized")
 	}
-	_, err := db.Exec(`INSERT INTO api_keys(name, api_key, enabled, created_at) VALUES(?,?,1,?)`,
-		name, key, time.Now().Unix())
+	_, err := db.Exec(`INSERT INTO api_keys(name, api_key, enabled, permissions, created_at) VALUES(?,?,1,?,?)`,
+		name, key, permissions, time.Now().Unix())
 	return err
 }
 
@@ -396,23 +403,63 @@ func toggleAPIKey(id int, enabled bool) error {
 	return err
 }
 
-// validateAPIKey checks if a key is valid and enabled. Returns key name.
+func updatePermissions(id int, perms string) error {
+	if db == nil {
+		return fmt.Errorf("db not initialized")
+	}
+	_, err := db.Exec(`UPDATE api_keys SET permissions = ? WHERE id = ?`, perms, id)
+	return err
+}
+
+// validateAPIKey checks if a key is valid and enabled. Returns key name and permissions.
 // Disabled rows (enabled=0) are treated as nonexistent — invisible to
 // auth — matching the user's "disable = doesn't exist" mental model.
-func validateAPIKey(key string) (string, bool) {
+func validateAPIKey(key string) (string, string, bool) {
 	if db == nil || key == "" {
-		return "", false
+		return "", "", false
 	}
-	var name string
+	var name, perms string
 	var en int
-	err := db.QueryRow(`SELECT name, enabled FROM api_keys WHERE api_key = ?`, key).Scan(&name, &en)
+	err := db.QueryRow(`SELECT name, enabled, permissions FROM api_keys WHERE api_key = ?`, key).Scan(&name, &en, &perms)
 	if err != nil {
-		return "", false
+		return "", "", false
 	}
 	if en != 1 {
-		return "", false
+		return "", "", false
 	}
-	return name, true
+	return name, perms, true
+}
+
+// hasPermission checks if a key's permissions allow access to the given path.
+// Empty permissions = all access. Permission values: chat, models, status, quota, logs, combos.
+func hasPermission(perms, path string) bool {
+	if perms == "" {
+		return true // no restrictions
+	}
+	// Map path to permission name
+	perm := ""
+	switch {
+	case strings.HasPrefix(path, "/v1/chat"):
+		perm = "chat"
+	case path == "/v1/models":
+		perm = "models"
+	case path == "/v1/status":
+		perm = "status"
+	case path == "/v1/quota":
+		perm = "quota"
+	case path == "/v1/logs":
+		perm = "logs"
+	case path == "/v1/combos":
+		perm = "combos"
+	default:
+		return true // unknown paths pass through
+	}
+	for _, p := range strings.Split(perms, ",") {
+		if strings.TrimSpace(p) == perm {
+			return true
+		}
+	}
+	return false
 }
 
 // ── Log queries ───────────────────────────────────────────────────────────

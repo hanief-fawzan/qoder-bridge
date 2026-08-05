@@ -636,7 +636,8 @@ func authMiddleware(next http.Handler) http.Handler {
 		if authRequired() {
 			auth := r.Header.Get("Authorization")
 			key := strings.TrimPrefix(auth, "Bearer ")
-			if _, ok := validateAPIKey(key); !ok {
+			_, perms, ok := validateAPIKey(key)
+			if !ok {
 				hint := " Bearer required — provide a valid sk-* key."
 				all, _ := listAPIKeys()
 				if len(all) == 0 {
@@ -650,6 +651,12 @@ func authMiddleware(next http.Handler) http.Handler {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(401)
 				fmt.Fprintf(w, `{"error":{"message":"invalid API key.%s"}}`, hint)
+				return
+			}
+			if !hasPermission(perms, r.URL.Path) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(403)
+				fmt.Fprintf(w, `{"error":{"message":"key does not have permission for %s"}}`, r.URL.Path)
 				return
 			}
 		}
@@ -676,7 +683,7 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 	usedAPIKey := "(no key)"
 	if auth := r.Header.Get("Authorization"); auth != "" {
 		key := strings.TrimPrefix(auth, "Bearer ")
-		if name, ok := validateAPIKey(key); ok {
+		if name, _, ok := validateAPIKey(key); ok {
 			usedAPIKey = name
 		}
 	}
