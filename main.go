@@ -17,6 +17,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -1477,14 +1478,16 @@ done:
 
 // upstreamStatusCode extracts HTTP status from an UpstreamError or guesses from error text.
 func upstreamStatusCode(err error) int {
-	if ue, ok := err.(*UpstreamError); ok {
+	var ue *UpstreamError
+	if errors.As(err, &ue) {
 		return ue.StatusCode
 	}
 	return 502
 }
 
 func isAuthError(err error) bool {
-	if ue, ok := err.(*UpstreamError); ok {
+	var ue *UpstreamError
+	if errors.As(err, &ue) {
 		if ue.StatusCode == 401 {
 			return true
 		}
@@ -1502,15 +1505,17 @@ func isAuthError(err error) bool {
 // isPricingError returns true for 403 code 112 — this PAT's quota/pricing limit.
 // The PAT is exhausted; rotating to another PAT may succeed.
 func isPricingError(err error) bool {
-	if ue, ok := err.(*UpstreamError); ok {
+	var ue *UpstreamError
+	if errors.As(err, &ue) {
 		return ue.StatusCode == 403 && strings.Contains(ue.Body, "\"112\"")
 	}
 	return false
 }
 
-// isQueueError returns true if the error is a Qoder queue/rate-limit error (403 with isQueued=true).
+// isQueueError returns true for a Qoder queue/rate-limit error (403 with isQueued=true).
 func isQueueError(err error) bool {
-	if ue, ok := err.(*UpstreamError); ok {
+	var ue *UpstreamError
+	if errors.As(err, &ue) {
 		return ue.StatusCode == 403 && strings.Contains(ue.Body, "isQueued")
 	}
 	return false
@@ -1520,7 +1525,8 @@ func isQueueError(err error) bool {
 // Plain 401 is NOT retryable — the credential is bad, not exhausted.
 // Other PATs can't recover an expired/invalid token.
 func isRetryableError(err error) bool {
-	if ue, ok := err.(*UpstreamError); ok {
+	var ue *UpstreamError
+	if errors.As(err, &ue) {
 		if ue.StatusCode == 401 {
 			return false // auth error: rotating won't help
 		}
@@ -1531,7 +1537,7 @@ func isRetryableError(err error) bool {
 	if isQueueError(err) {
 		return true // queue backpressure — different PAT may not be queued
 	}
-	if ue, ok := err.(*UpstreamError); ok {
+	if errors.As(err, &ue) {
 		return ue.StatusCode == 429 || ue.StatusCode >= 500
 	}
 	// network / parse errors are retryable
@@ -1699,7 +1705,8 @@ func recoverPanic(w http.ResponseWriter, flusher http.Flusher, id string, create
 // forwardUpstreamError forwards the raw Qoder API error to the client,
 // preserving the upstream status code and body for debugging.
 func forwardUpstreamError(w http.ResponseWriter, err error) {
-	if ue, ok := err.(*UpstreamError); ok {
+	var ue *UpstreamError
+	if errors.As(err, &ue) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(ue.StatusCode)
 		// Try to forward as structured JSON if possible
