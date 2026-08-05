@@ -938,8 +938,18 @@ func handleNonStream(w http.ResponseWriter, r *http.Request, req ChatRequest, mo
 		text = result.Text
 	}
 
+	// Defense-in-depth: catch empty responses at handler level too.
+	if result == nil || (len(result.ToolCalls) == 0 && strings.TrimSpace(text) == "") {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(502)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   map[string]interface{}{"message": fmt.Sprintf("Qoder returned empty response for model '%s'. Possible causes: model unavailable, quota exhausted, or upstream timeout.", modelKey)},
+		})
+		return
+	}
+
 	choices := []Choice{{Index: 0, Message: &Message{Role: "assistant", Content: text}, FinishReason: "stop"}}
-	if result != nil && len(result.ToolCalls) > 0 {
+	if len(result.ToolCalls) > 0 {
 		// Return tool_calls in OpenAI format
 		choices = []Choice{{Index: 0, Message: &Message{Role: "assistant", Content: text, ToolCalls: result.ToolCalls}, FinishReason: "tool_calls"}}
 	}
@@ -1025,8 +1035,20 @@ func handleBufferedStream(w http.ResponseWriter, r *http.Request, req ChatReques
 		text = result.Text
 	}
 
-	hasToolCalls := result != nil && len(result.ToolCalls) > 0
+	// Defense-in-depth: catch empty responses in buffered stream too.
+	if result == nil || (len(result.ToolCalls) == 0 && strings.TrimSpace(text) == "") {
+		log.Printf("buffered stream: empty response for %s", modelKey)
+		errReason := "error"
+		sendSSE(w, flusher, SSEChunk{
+			ID: id, Object: "chat.completion.chunk", Created: created, Model: req.Model,
+			Choices: []SSEChoice{{Index: 0, Delta: json.RawMessage(`{}`), FinishReason: &errReason}},
+		})
+		fmt.Fprintf(w, "data: [DONE]\n\n")
+		flusher.Flush()
+		return
+	}
 
+	hasToolCalls := result != nil && len(result.ToolCalls) > 0
 	if hasToolCalls {
 		// Send prefix text if any
 		if strings.TrimSpace(text) != "" {
@@ -1085,8 +1107,16 @@ func handleComboNonStream(w http.ResponseWriter, r *http.Request, req ChatReques
 				if result != nil {
 					text = result.Text
 				}
+
+				// Treat empty response as error — try next model.
+				if result == nil || (len(result.ToolCalls) == 0 && strings.TrimSpace(text) == "") {
+					log.Printf("combo %q: qd/%s returned empty response, trying next", comboName, modelKey)
+					lastErr = fmt.Errorf("empty response from %s", modelKey)
+					continue
+				}
+
 				choices := []Choice{{Index: 0, Message: &Message{Role: "assistant", Content: text}, FinishReason: "stop"}}
-				if result != nil && len(result.ToolCalls) > 0 {
+				if len(result.ToolCalls) > 0 {
 					choices = []Choice{{Index: 0, Message: &Message{Role: "assistant", Content: text, ToolCalls: result.ToolCalls}, FinishReason: "tool_calls"}}
 				}
 
@@ -1179,6 +1209,16 @@ comboRounds:
 
 			if err == nil {
 				_ = result
+				// Treat empty as failure — try next model.
+				text := ""
+				if result != nil {
+					text = result.Text
+				}
+				if result == nil || (len(result.ToolCalls) == 0 && strings.TrimSpace(text) == "") {
+					log.Printf("combo stream %q: qd/%s returned empty, trying next", comboName, modelKey)
+					lastErr = fmt.Errorf("empty response from %s", modelKey)
+					continue
+				}
 				if flusher != nil {
 					// Emit tool_calls if present
 					if result != nil && len(result.ToolCalls) > 0 {
