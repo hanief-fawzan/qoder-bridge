@@ -1136,3 +1136,32 @@ func TestNormalizeMessages_ToolProtocolInSystemPrompt(t *testing.T) {
 		t.Error("should have terminal example")
 	}
 }
+
+func TestParseOpenAINativeFormat(t *testing.T) {
+	// Model emits OpenAI native: {"function":{"name":"X","arguments":"..."}}
+	// inside a bare JSON object without wrapper.
+	input := `Here is my action:
+
+{"function":{"name":"write_file","arguments":"{\"path\":\"test.py\",\"content\":\"print(42)\"}"}}`
+
+	calls, _ := parseToolCallsFromText(input)
+	if len(calls) == 0 {
+		t.Fatal("expected 1 tool_call from OpenAI native format, got 0")
+	}
+	if calls[0].Function.Name != "write_file" {
+		t.Errorf("expected name=write_file, got %s", calls[0].Function.Name)
+	}
+}
+
+func TestParseOpenAINativeInFencedBlock(t *testing.T) {
+	// Model emits fenced JSON with OpenAI native format
+	input := "```json\n" + `{"tool_calls":[{"function":{"name":"terminal","arguments":"{\"command\":\"ls\"}"}}]}` + "\n```"
+
+	calls, _ := parseToolCallsFromText(input)
+	if len(calls) == 0 {
+		t.Fatal("expected 1 tool_call from fenced OpenAI native, got 0")
+	}
+	if calls[0].Function.Name != "terminal" {
+		t.Errorf("expected name=terminal, got %s", calls[0].Function.Name)
+	}
+}

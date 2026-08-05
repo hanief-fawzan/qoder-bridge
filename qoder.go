@@ -1005,6 +1005,15 @@ func parseToolCallsJSON(jsonStr string) ([]map[string]interface{}, error) {
 func normalizeToolCallEntries(entries []map[string]interface{}) ([]map[string]interface{}, error) {
 	var result []map[string]interface{}
 	for _, e := range entries {
+		// Normalize: OpenAI native {function: {name, arguments}} → flat {name, arguments}
+		if fn, ok := e["function"].(map[string]interface{}); ok {
+			if n, ok := fn["name"].(string); ok && n != "" {
+				e["name"] = n
+			}
+			if a, ok := fn["arguments"]; ok {
+				e["arguments"] = a
+			}
+		}
 		// Normalize name: "name" or "tool"
 		name, _ := e["name"].(string)
 		if name == "" {
