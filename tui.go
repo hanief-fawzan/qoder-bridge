@@ -989,30 +989,16 @@ func showAllView() tview.Primitive {
 // ── Update ────────────────────────────────────────────────────────────────
 
 func updateView() tview.Primitive {
-	text := tview.NewTextView().SetDynamicColors(true)
-	text.SetBorder(true).SetTitle(colorTitle + " Update Bridge ").SetTitleAlign(tview.AlignCenter)
-	text.SetText(fmt.Sprintf("\n  %sThis will run:%s\n\n  %scd <bridge-dir> && git pull && go build -o qoder-bridge .%s\n\n  %sAfter build, restart the bridge:%s\n  %s./qoder-bridge stop && ./qoder-bridge%s\n\n  %sPress Enter to update, Esc to cancel.%s",
-		colorKey, colorReset,
-		colorAccent, colorReset,
-		colorKey, colorReset,
-		colorAccent, colorReset,
-		colorDim, colorReset))
-
-	text.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
-		switch event.Key() {
-		case tcell.KeyEscape:
-			goBack()
-			return nil
-		case tcell.KeyEnter:
+	list := tview.NewList().
+		AddItem("  🔄  Update Bridge", "Pull latest, rebuild, restart", 'u', func() {
 			result := tuiRunUpdate()
 			pages.RemovePage("sub")
 			pushPage("sub", updateResult(result))
-			return nil
-		}
-		return event
-	})
-
-	return wrapWithHint(text, fmt.Sprintf("%sEnter%s update   %sEsc%s cancel", colorKey, colorReset, colorKey, colorReset))
+		})
+	list.AddItem("  ← Back", "Esc", 'b', func() { goBack() })
+	list.SetBorder(true).SetTitle(colorTitle + " Update Bridge ").SetTitleAlign(tview.AlignCenter)
+	wireEsc(list)
+	return wrapWithHint(list, fmt.Sprintf("%sEnter%s update   %sEsc%s back", colorKey, colorReset, colorKey, colorReset))
 }
 
 func tuiRunUpdate() string {
@@ -1139,29 +1125,16 @@ func bridgeExe() string {
 }
 
 func restartView() tview.Primitive {
-	text := tview.NewTextView().SetDynamicColors(true)
-	text.SetBorder(true).SetTitle(colorTitle + " Restart Bridge ").SetTitleAlign(tview.AlignCenter)
-	text.SetText(fmt.Sprintf("\n  %sThis will:%s\n\n  %s1. Stop the running bridge daemon%s\n  %s2. Start it again with current .env + DB config%s\n\n  %sPress Enter to restart, Esc to cancel.%s",
-		colorKey, colorReset,
-		colorAccent, colorReset,
-		colorAccent, colorReset,
-		colorDim, colorReset))
-
-	text.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
-		switch event.Key() {
-		case tcell.KeyEscape:
-			goBack()
-			return nil
-		case tcell.KeyEnter:
+	list := tview.NewList().
+		AddItem("  🔁  Restart Bridge", "Stop and restart the daemon", 'r', func() {
 			result := tuiDoRestart()
 			pages.RemovePage("sub")
 			pushPage("sub", updateResult(result))
-			return nil
-		}
-		return event
-	})
-
-	return wrapWithHint(text, fmt.Sprintf("%sEnter%s restart   %sEsc%s cancel", colorKey, colorReset, colorKey, colorReset))
+		})
+	list.AddItem("  ← Back", "Esc", 'b', func() { goBack() })
+	list.SetBorder(true).SetTitle(colorTitle + " Restart Bridge ").SetTitleAlign(tview.AlignCenter)
+	wireEsc(list)
+	return wrapWithHint(list, fmt.Sprintf("%sEnter%s restart   %sEsc%s back", colorKey, colorReset, colorKey, colorReset))
 }
 
 // updateResult shows the result of an update/restart with navigation options.
@@ -1181,9 +1154,11 @@ func updateResult(result string) tview.Primitive {
 	list.SetBorder(true).SetTitle(colorTitle + " Navigation ").SetTitleAlign(tview.AlignCenter)
 	wireEsc(list)
 
+	// List is the focused child in the flex (first, focus=true).
+	// Text is secondary (focus=false).
 	flex := tview.NewFlex().SetDirection(tview.FlexRow).
-		AddItem(text, 0, 3, true).
-		AddItem(list, 0, 2, false)
+		AddItem(list, 0, 2, true).
+		AddItem(text, 0, 3, false)
 	flex.SetBorder(true).SetTitle(colorTitle + " Result ").SetTitleAlign(tview.AlignCenter)
 
 	return wrapWithHint(flex, fmt.Sprintf("%s↑↓%s navigate   %sEnter%s select   %sEsc%s back", colorKey, colorReset, colorKey, colorReset, colorKey, colorReset))
