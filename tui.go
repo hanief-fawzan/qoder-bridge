@@ -41,7 +41,6 @@ func runConfigTUI(cfg *envConfig) {
 // pushPage adds a named sub-page and switches to it.
 func pushPage(name string, page tview.Primitive) {
 	pages.AddAndSwitchToPage(name, page, true)
-	app.SetFocus(page)
 }
 
 // goBack removes the current page (reveals previous or main).
@@ -55,11 +54,6 @@ func goBack() {
 	name2, _ := pages.GetFrontPage()
 	if name2 == "main" {
 		pages.RemovePage("sub")
-	}
-	// Restore focus to whatever page is now front.
-	if frontName, front := pages.GetFrontPage(); front != nil {
-		app.SetFocus(front)
-		_ = frontName
 	}
 }
 
@@ -477,13 +471,17 @@ func showPermForm(name string, onSubmit func(perms string)) {
 		if len(chosen) < len(allPerms) {
 			perms = strings.Join(chosen, ",")
 		}
-		pages.RemovePage("perms")
-		onSubmit(perms)
+		app.QueueUpdateDraw(func() {
+			pages.RemovePage("perms")
+			onSubmit(perms)
+		})
 	})
 
 	// Cancel item (index len(allPerms)+1)
 	list.AddItem(colorRed+"  ✗  Cancel"+colorReset, "Discard changes", 'c', func() {
-		pages.RemovePage("perms")
+		app.QueueUpdateDraw(func() {
+			pages.RemovePage("perms")
+		})
 	})
 
 	// Enter toggles the focused permission item (but not Apply/Cancel)
