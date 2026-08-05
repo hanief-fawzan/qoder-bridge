@@ -93,16 +93,15 @@ func hintBar(hint string) tview.Primitive {
 }
 
 // wrapWithHint wraps a primitive with a footer hint bar.
-// Esc is handled by wireEsc on the inner widget — NOT on the Flex,
-// because Flex.SetInputCapture intercepts arrow keys and breaks navigation.
+// Uses tview.Frame which delegates ALL input to the inner widget.
+// tview.Flex intercepts arrow keys for child-navigation — Frame doesn't.
 func wrapWithHint(p tview.Primitive, hint string) tview.Primitive {
-	hintView := hintBar(hint)
-	flex := tview.NewFlex().SetDirection(tview.FlexRow).
-		AddItem(p, 0, 1, true).
-		AddItem(hintView, 1, 0, false)
-	// Wire Esc on inner widget so Flex doesn't steal arrow keys.
+	frame := tview.NewFrame(p)
+	frame.AddText(strings.ReplaceAll(strings.ReplaceAll(hint, colorKey, ""), colorReset, ""), false, tview.AlignLeft, tcell.ColorDefault)
+	frame.SetBorders(0, 1, 0, 0, 0, 0)
+	// Esc handled by wireEsc on inner widget.
 	wireEsc(p)
-	return flex
+	return frame
 }
 
 // wireEsc adds Esc → goBack on a List or Table.
@@ -129,13 +128,7 @@ func wireEsc(p tview.Primitive) {
 
 // wrapTable wraps a table with a footer showing key hints.
 func wrapTable(t *tview.Table) tview.Primitive {
-	wireEsc(t)
-	hint := tview.NewTextView().SetDynamicColors(true).
-		SetText(fmt.Sprintf("  %s↑↓%s navigate   %sEsc%s go back", colorKey, colorReset, colorKey, colorReset))
-	flex := tview.NewFlex().SetDirection(tview.FlexRow).
-		AddItem(t, 0, 1, true).
-		AddItem(hint, 1, 0, false)
-	return flex
+	return wrapWithHint(t, fmt.Sprintf("%s↑↓%s navigate   %sEsc%s go back", colorKey, colorReset, colorKey, colorReset))
 }
 
 // showMsg displays a modal message, then returns to the named menu.
@@ -505,12 +498,8 @@ func showPermForm(name string, onSubmit func(perms string)) {
 	list.SetBorder(true).
 		SetTitle(fmt.Sprintf(colorTitle+" Permissions for [%s] ", name)).
 		SetTitleAlign(tview.AlignCenter)
-	wireEsc(list)
-	hint := hintBar(fmt.Sprintf("%s↑↓%s navigate   %sEnter%s toggle   %sEsc%s cancel", colorKey, colorReset, colorKey, colorReset, colorKey, colorReset))
-	permFlex := tview.NewFlex().SetDirection(tview.FlexRow).
-		AddItem(list, 0, 1, true).
-		AddItem(hint, 1, 0, false)
-	pages.AddAndSwitchToPage("perms", permFlex, true)
+	wrapped := wrapWithHint(list, fmt.Sprintf("%s↑↓%s navigate   %sEnter%s toggle   %sEsc%s cancel", colorKey, colorReset, colorKey, colorReset, colorKey, colorReset))
+	pages.AddAndSwitchToPage("perms", wrapped, true)
 	app.SetFocus(list)
 }
 
