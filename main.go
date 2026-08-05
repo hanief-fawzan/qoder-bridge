@@ -1351,11 +1351,8 @@ func runWithPATRotation(ctx context.Context, pool *PATPool, modelKey string, mes
 		result, lastErr = callQoder(ctx, pat, modelKey, messages, maxTokens, callback, tools, thinkingEffort, contextWindow)
 		if lastErr == nil && result != nil && (strings.TrimSpace(result.Text) != "" || len(result.ToolCalls) > 0) {
 			// Auto-retry: tools requested but model responded text-only.
-			// Inject a stronger user reminder and retry once with same PAT.
+			// Retry up to 2 times with progressively stronger injection.
 			if len(tools) > 0 && len(result.ToolCalls) == 0 && !emitted {
-				log.Printf("qd %s: text-only response despite tools — retrying with stronger injection", modelKey)
-				retryMsgs := make([]ChatMessage, len(messages))
-				copy(retryMsgs, messages)
 				toolList := ""
 				for _, t := range tools {
 					if toolList != "" {
@@ -1363,7 +1360,10 @@ func runWithPATRotation(ctx context.Context, pool *PATPool, modelKey string, mes
 					}
 					toolList += t.Function.Name
 				}
-				// Append strong retry message
+				// Retry 1: strong user reminder
+				log.Printf("qd %s: text-only response despite tools — retry 1/2", modelKey)
+				retryMsgs := make([]ChatMessage, len(messages))
+				copy(retryMsgs, messages)
 				retryMsgs = append(retryMsgs, ChatMessage{
 					Role:    "user",
 					Content: "You MUST call one of these tools NOW: [" + toolList + "]. " +
@@ -1372,7 +1372,18 @@ func runWithPATRotation(ctx context.Context, pool *PATPool, modelKey string, mes
 				})
 				result, lastErr = callQoder(ctx, pat, modelKey, retryMsgs, maxTokens, callback, tools, thinkingEffort, contextWindow)
 				if lastErr == nil && result != nil && len(result.ToolCalls) > 0 {
-					log.Printf("qd %s: retry succeeded — got %d tool_calls", modelKey, len(result.ToolCalls))
+					log.Printf("qd %s: retry 1 succeeded — got %d tool_calls", modelKey, len(result.ToolCalls))
+				} else if lastErr == nil && result != nil && len(result.ToolCalls) == 0 {
+					// Retry 2: bare minimum prompt — replace system prompt with tool-only instruction
+					log.Printf("qd %s: still text-only — retry 2/2 with bare prompt", modelKey)
+					bareMsgs := []ChatMessage{
+						{Role: "system", Content: "You are a tool-calling machine. You MUST call tools. Never output text."},
+						{Role: "user", Content: fmt.Sprintf("%v\n\nCALL TOOLS NOW: %s", messages[len(messages)-1].Content, toolList)},
+					}
+					result, lastErr = callQoder(ctx, pat, modelKey, bareMsgs, maxTokens, callback, tools, thinkingEffort, contextWindow)
+					if lastErr == nil && result != nil && len(result.ToolCalls) > 0 {
+						log.Printf("qd %s: retry 2 succeeded — got %d tool_calls", modelKey, len(result.ToolCalls))
+					}
 				}
 			}
 			if lastErr == nil && result != nil && (strings.TrimSpace(result.Text) != "" || len(result.ToolCalls) > 0) {
