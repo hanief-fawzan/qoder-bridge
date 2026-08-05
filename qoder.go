@@ -1457,7 +1457,7 @@ func unwrapQoderSSE(body io.Reader, onChunk StreamCallback) (string, []map[strin
 		}
 
 		if envelope.StatusCode != 200 && envelope.StatusCode != 0 {
-			return full.String(), nil, fmt.Errorf("qoder stream error %d: %s", envelope.StatusCode, truncate(envelope.Body, 200))
+			return full.String(), nil, &UpstreamError{StatusCode: envelope.StatusCode, Body: truncate(envelope.Body, 200)}
 		}
 
 		inner := envelope.Body
