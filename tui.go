@@ -606,20 +606,18 @@ func endpointsView() tview.Primitive {
 		{"Health", "/health"},
 	}
 
-	text := tview.NewTextView().SetDynamicColors(true)
-	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("\n  %s─── API Endpoints ───%s\n\n", colorTitle, colorReset))
+	list := tview.NewList()
 	for _, e := range endpoints {
-		sb.WriteString(fmt.Sprintf("  %s%-20s%s %s%s%s\n", colorKey, e.name, colorReset, colorAccent, base+e.path, colorReset))
+		list.AddItem(fmt.Sprintf("  %s  %s%s%s", e.name, colorAccent, base+e.path, colorReset), "", 0, nil)
 	}
-	sb.WriteString(fmt.Sprintf("\n  %sBase URL:%s %s%s%s\n", colorKey, colorReset, colorAccent, base, colorReset))
+	list.AddItem(fmt.Sprintf("  %sBase URL:%s %s%s%s", colorKey, colorReset, colorAccent, base, colorReset), "", 0, nil)
 	if domain == "" {
-		sb.WriteString(fmt.Sprintf("\n  %sTip: Set a domain in config for a public URL.%s\n", colorDim, colorReset))
+		list.AddItem(fmt.Sprintf("  %sTip: Set a domain in config for a public URL.%s", colorDim, colorReset), "", 0, nil)
 	}
-	text.SetText(sb.String())
-	text.SetBorder(true).SetTitle(colorTitle + " Endpoints ").SetTitleAlign(tview.AlignCenter)
-
-	return wrapWithHint(text, fmt.Sprintf("%sEsc%s back to menu", colorKey, colorReset))
+	list.AddItem("  ← Back", "Esc", 'b', func() { goBack() })
+	list.SetBorder(true).SetTitle(colorTitle + " Endpoints ").SetTitleAlign(tview.AlignCenter)
+	wireEsc(list)
+	return wrapWithHint(list, fmt.Sprintf("%sEsc%s back to menu", colorKey, colorReset))
 }
 
 // ── Delay ─────────────────────────────────────────────────────────────────
