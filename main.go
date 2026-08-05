@@ -1433,6 +1433,57 @@ func handleQuota(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(results)
 }
 
+// handleUpstreamModels dumps the raw model list from the Qoder API so we can
+// see which models exist upstream (including ones not yet mapped in frontierModels).
+func handleUpstreamModels(w http.ResponseWriter, r *http.Request) {
+	pats := patPool.All()
+	if len(pats) == 0 {
+		http.Error(w, `{"error":"no PATs configured"}`, 500)
+		return
+	}
+	cred, err := getCredential(pats[0])
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"credential: %s"}`, err.Error()), 500)
+		return
+	}
+	// Force a fresh fetch (retry=true bypasses cache).
+	mc, err := fetchModelConfig(cred, "__list__", true)
+	_ = mc
+	if err != nil {
+		// fetchModelConfig returns error when key not found, but cache is populated.
+		// Fall through to read cache.
+	}
+	configs := allCachedModelConfigs()
+	if configs == nil {
+		http.Error(w, `{"error":"model list cache empty"}`, 500)
+		return
+	}
+	type entry struct {
+		Key         string `json:"key"`
+		DisplayName string `json:"display_name"`
+		IsReasoning bool   `json:"is_reasoning"`
+		Source      string `json:"source"`
+		Mapped      bool   `json:"mapped"`
+	}
+	out := make([]entry, 0, len(configs))
+	for _, c := range configs {
+		_, mapped := frontierModels[c.Key]
+		out = append(out, entry{
+			Key:         c.Key,
+			DisplayName: c.DisplayName,
+			IsReasoning: c.IsReasoning,
+			Source:      c.Source,
+			Mapped:      mapped,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"count":  len(out),
+		"models": out,
+	})
+}
+
 // ── PAT rotation ────────────────────────────────────────────────────────────
 
 func runWithPATRotation(ctx context.Context, pool *PATPool, modelKey string, messages []ChatMessage, maxTokens int, onChunk StreamCallback, tools []ToolDef, thinkingEffort string, contextWindow int, clientIP string, apikey string) (*ChatResult, error) {
@@ -2167,6 +2218,7 @@ func runServe(args []string) {
 	mux.HandleFunc("/v1/models", handleModels)
 	mux.HandleFunc("/v1/chat/completions", handleChat)
 	mux.HandleFunc("/v1/quota", handleQuota)
+	mux.HandleFunc("/v1/upstream-models", handleUpstreamModels)
 	mux.HandleFunc("/v1/combos", handleCombos)
 	mux.HandleFunc("/v1/status", handleStatus)
 	mux.HandleFunc("/v1/logs", handleLogs)

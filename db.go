@@ -441,7 +441,7 @@ func hasPermission(perms, path string) bool {
 	switch {
 	case strings.HasPrefix(path, "/v1/chat"):
 		perm = "chat"
-	case path == "/v1/models":
+	case path == "/v1/models", path == "/v1/upstream-models":
 		perm = "models"
 	case path == "/v1/status":
 		perm = "status"

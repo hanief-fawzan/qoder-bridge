@@ -177,6 +177,7 @@ func fetchUserID(jobToken string) (string, error) {
 
 type modelConfig struct {
 	Key             string `json:"key"`
+	DisplayName     string `json:"display_name,omitempty"`
 	IsReasoning     bool   `json:"is_reasoning"`
 	MaxOutputTokens int    `json:"max_output_tokens"`
 	Source          string `json:"source"`
@@ -215,6 +216,21 @@ func getCachedModelConfig(modelKey string) *modelConfig {
 		return nil
 	}
 	return modelConfigCache[modelKey]
+}
+
+// allCachedModelConfigs returns every model from the upstream Qoder model
+// list cache, or nil if the cache is empty/stale.
+func allCachedModelConfigs() []*modelConfig {
+	modelConfigCacheMu.RLock()
+	defer modelConfigCacheMu.RUnlock()
+	if modelConfigCache == nil || time.Since(modelConfigCacheTime) >= 10*time.Minute {
+		return nil
+	}
+	out := make([]*modelConfig, 0, len(modelConfigCache))
+	for _, mc := range modelConfigCache {
+		out = append(out, mc)
+	}
+	return out
 }
 
 // ensureModelConfig returns cached config or fetches it. If fetch fails,
@@ -319,6 +335,7 @@ func fetchModelConfig(cred *patCredential, modelKey string, retry bool) (*modelC
 	for i, m := range listResp.Chat {
 		mc := &modelConfig{
 			Key:         m.Key,
+			DisplayName: m.DisplayName,
 			IsReasoning: m.IsReasoning,
 			Source:      m.Source,
 		}
