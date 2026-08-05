@@ -22,8 +22,8 @@ import (
 )
 
 const (
-	qoderChatURL       = "https://api3.qoder.sh/algo/api/v2/service/pro/sse/agent_chat_generation?FetchKeys=llm_model_result&AgentId=agent_common&Encode=1"
-	qoderModelListURL  = "https://api3.qoder.sh/algo/api/v2/model/list"
+	qoderChatURL       = "https://api2.qoder.sh/algo/api/v2/service/pro/sse/agent_chat_generation?FetchKeys=llm_model_result&AgentId=agent_common&Encode=1"
+	qoderModelListURL  = "https://api2.qoder.sh/algo/api/v2/model/list"
 	qoderJobTokenURL   = "https://openapi.qoder.sh/api/v1/jobToken/exchange"
 	qoderUserInfoURL   = "https://openapi.qoder.sh/api/v1/userinfo"
 	qoderQuotaUsageURL = "https://openapi.qoder.sh/api/v2/quota/usage"
