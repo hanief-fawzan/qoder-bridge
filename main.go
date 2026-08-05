@@ -624,6 +624,39 @@ func boolToStr(b bool) string {
 	return "0"
 }
 
+// authMiddleware wraps an http.Handler and enforces Bearer auth when
+// api_key_enabled is ON. /health is excluded at the mux level.
+func authMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// /health is always public (load balancer probes, uptime checks).
+		if r.URL.Path == "/health" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if authRequired() {
+			auth := r.Header.Get("Authorization")
+			key := strings.TrimPrefix(auth, "Bearer ")
+			if _, ok := validateAPIKey(key); !ok {
+				hint := " Bearer required — provide a valid sk-* key."
+				all, _ := listAPIKeys()
+				if len(all) == 0 {
+					hint = " No API keys configured — generate one via TUI (API Keys → Generate) or set the toggle to OFF."
+				} else {
+					enabled, _ := listEnabledAPIKeys()
+					if len(enabled) == 0 {
+						hint = " All API keys are disabled — enable one in TUI or set the toggle to OFF."
+					}
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(401)
+				fmt.Fprintf(w, `{"error":{"message":"invalid API key.%s"}}`, hint)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 func handleChat(w http.ResponseWriter, r *http.Request) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -639,39 +672,12 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Auth: a single switch decides the entire policy. No DB lookup on
-	// the open path, one query on the closed path.
+	// Auth: middleware already enforced. This block just attributes the key.
 	usedAPIKey := "(no key)"
-	if authRequired() {
-		auth := r.Header.Get("Authorization")
+	if auth := r.Header.Get("Authorization"); auth != "" {
 		key := strings.TrimPrefix(auth, "Bearer ")
 		if name, ok := validateAPIKey(key); ok {
 			usedAPIKey = name
-		} else {
-			// Tailored hint based on whether keys exist in the table.
-			hint := " Bearer required — provide a valid sk-* key."
-			all, _ := listAPIKeys()
-			if len(all) == 0 {
-				hint = " No API keys configured — generate one via TUI (API Keys → Generate) or set the global toggle to OFF for open access."
-			} else {
-				enabled, _ := listEnabledAPIKeys()
-				if len(enabled) == 0 {
-					hint = " All API keys are disabled — enable one in TUI or set the global toggle to OFF for open access."
-				}
-			}
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(401)
-			fmt.Fprintf(w, `{"error":{"message":"invalid API key.%s"}}`, hint)
-			return
-		}
-	} else {
-		// Open access — accept any Bearer that's valid (if any) for
-		// usage attribution; never block the request.
-		if auth := r.Header.Get("Authorization"); auth != "" {
-			key := strings.TrimPrefix(auth, "Bearer ")
-			if name, ok := validateAPIKey(key); ok {
-				usedAPIKey = name
-			}
 		}
 	}
 
@@ -2188,7 +2194,7 @@ func runServe(args []string) {
 
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           mux,
+		Handler:           authMiddleware(mux),
 		ReadHeaderTimeout: 10 * time.Second,  // slowloris protection
 		WriteTimeout:      0,                 // SSE streams can run indefinitely
 		IdleTimeout:       120 * time.Second, // close idle keep-alive connections
