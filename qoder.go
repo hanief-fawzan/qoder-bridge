@@ -179,6 +179,7 @@ type modelConfig struct {
 	Key             string `json:"key"`
 	DisplayName     string `json:"display_name,omitempty"`
 	IsReasoning     bool   `json:"is_reasoning"`
+	IsVL            bool   `json:"is_vl,omitempty"`
 	MaxOutputTokens int    `json:"max_output_tokens"`
 	Source          string `json:"source"`
 	// Other fields from API — store raw for forwarding
@@ -189,24 +190,48 @@ var (
 	modelConfigCache     map[string]*modelConfig
 	modelConfigCacheMu   sync.RWMutex
 	modelConfigCacheTime time.Time
+	// ponytail: inflight dedup — concurrent model-list fetches for the same
+	// PAT coalesce into one upstream call. Upgrade path: per-credential key.
+	inflightModelFetch sync.Map // key="model-list", value=chan struct{}
 )
 
 func getModelConfig(cred *patCredential, modelKey string) (*modelConfig, error) {
 	modelConfigCacheMu.RLock()
-	if modelConfigCache != nil && time.Since(modelConfigCacheTime) < 10*time.Minute {
+	if modelConfigCache != nil && time.Since(modelConfigCacheTime) < 1*time.Hour {
 		mc, ok := modelConfigCache[modelKey]
 		modelConfigCacheMu.RUnlock()
 		if ok {
 			return mc, nil
 		}
-		// ponytail: cache is fresh and model isn't in it — re-fetching the
-		// whole list won't help (model genuinely absent upstream, e.g. preview
-		// keys). Fail fast instead of hammering the model-list endpoint on
-		// every request. Ceiling: a model added upstream mid-cache-window waits
-		// up to 10min; upgrade path = per-key negative cache if that bites.
 		return nil, fmt.Errorf("model %q not found in model list (%d models)", modelKey, len(modelConfigCache))
 	}
 	modelConfigCacheMu.RUnlock()
+
+	// Inflight dedup: wait for an in-progress fetch instead of hammering upstream.
+	const inflightKey = "model-list"
+	if ch, loaded := inflightModelFetch.LoadOrStore(inflightKey, make(chan struct{})); loaded {
+		// Another goroutine is already fetching — wait for it.
+		<-ch.(chan struct{})
+		// Check cache again after the other goroutine finished.
+		modelConfigCacheMu.RLock()
+		if modelConfigCache != nil && time.Since(modelConfigCacheTime) < 1*time.Hour {
+			mc, ok := modelConfigCache[modelKey]
+			modelConfigCacheMu.RUnlock()
+			if ok {
+				return mc, nil
+			}
+			return nil, fmt.Errorf("model %q not found in model list (%d models)", modelKey, len(modelConfigCache))
+		}
+		modelConfigCacheMu.RUnlock()
+		// Cache still stale — fall through to fetch ourselves.
+	}
+	// Signal completion when we're done.
+	defer func() {
+		if ch, ok := inflightModelFetch.Load(inflightKey); ok {
+			close(ch.(chan struct{}))
+			inflightModelFetch.Delete(inflightKey)
+		}
+	}()
 
 	return fetchModelConfig(cred, modelKey, true)
 }
@@ -216,7 +241,7 @@ func getModelConfig(cred *patCredential, modelKey string) (*modelConfig, error) 
 func getCachedModelConfig(modelKey string) *modelConfig {
 	modelConfigCacheMu.RLock()
 	defer modelConfigCacheMu.RUnlock()
-	if modelConfigCache == nil || time.Since(modelConfigCacheTime) >= 10*time.Minute {
+	if modelConfigCache == nil || time.Since(modelConfigCacheTime) >= 1*time.Hour {
 		return nil
 	}
 	return modelConfigCache[modelKey]
@@ -227,7 +252,7 @@ func getCachedModelConfig(modelKey string) *modelConfig {
 func allCachedModelConfigs() []*modelConfig {
 	modelConfigCacheMu.RLock()
 	defer modelConfigCacheMu.RUnlock()
-	if modelConfigCache == nil || time.Since(modelConfigCacheTime) >= 10*time.Minute {
+	if modelConfigCache == nil || time.Since(modelConfigCacheTime) >= 1*time.Hour {
 		return nil
 	}
 	out := make([]*modelConfig, 0, len(modelConfigCache))
@@ -314,8 +339,10 @@ func fetchModelConfig(cred *patCredential, modelKey string, retry bool) (*modelC
 			Format          string          `json:"format"`
 			Source          string          `json:"source"`
 			IsReasoning     bool            `json:"is_reasoning"`
+			IsVL            bool            `json:"is_vl"`
 			IsDefault       bool            `json:"is_default"`
 			MaxInputTokens  int             `json:"max_input_tokens"`
+			MaxOutputTokens int             `json:"max_output_tokens"`
 			PriceFactor     float64         `json:"price_factor"`
 			Raw             json.RawMessage `json:"-"`
 		} `json:"chat"`
@@ -338,10 +365,12 @@ func fetchModelConfig(cred *patCredential, modelKey string, retry bool) (*modelC
 	newCache := make(map[string]*modelConfig)
 	for i, m := range listResp.Chat {
 		mc := &modelConfig{
-			Key:         m.Key,
-			DisplayName: m.DisplayName,
-			IsReasoning: m.IsReasoning,
-			Source:      m.Source,
+			Key:             m.Key,
+			DisplayName:     m.DisplayName,
+			IsReasoning:     m.IsReasoning,
+			IsVL:            m.IsVL,
+			MaxOutputTokens: m.MaxOutputTokens,
+			Source:          m.Source,
 		}
 		if i < len(rawChatModels) {
 			mc.Raw = rawChatModels[i]

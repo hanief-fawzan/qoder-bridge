@@ -285,6 +285,7 @@ type ChatRequest struct {
 	Messages       []ChatMessage `json:"messages"`
 	Stream         bool          `json:"stream"`
 	MaxTokens      int           `json:"max_tokens,omitempty"`
+	MaxCompletionTokens int        `json:"max_completion_tokens,omitempty"`
 	Tools          []ToolDef     `json:"tools,omitempty"`
 	ToolChoice     interface{}   `json:"tool_choice,omitempty"`
 	ThinkingEffort string        `json:"thinking_effort,omitempty"`     // low, medium, high, xhigh
@@ -754,6 +755,12 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 	req.ThinkingEffort = resolveThinkingEffort(req)
 	// Resolve context window (auto-set based on model tier if not specified)
 	req.ContextWindow = resolveContextWindow(req, modelKey)
+	// Resolve max_tokens from max_completion_tokens (OpenAI standard field)
+	if req.MaxTokens <= 0 && req.MaxCompletionTokens > 0 {
+		req.MaxTokens = req.MaxCompletionTokens
+	} else if req.MaxCompletionTokens > 0 && req.MaxCompletionTokens < req.MaxTokens {
+		req.MaxTokens = req.MaxCompletionTokens
+	}
 
 	// Check if this is a combo request
 	if comboModels, isCombo := resolveCombo(modelInput); isCombo {
