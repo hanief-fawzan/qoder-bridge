@@ -41,6 +41,7 @@ func runConfigTUI(cfg *envConfig) {
 // pushPage adds a named sub-page and switches to it.
 func pushPage(name string, page tview.Primitive) {
 	pages.AddAndSwitchToPage(name, page, true)
+	app.SetFocus(page)
 }
 
 // goBack removes the current page (reveals previous or main).
@@ -51,10 +52,14 @@ func goBack() {
 		return
 	}
 	pages.RemovePage(name)
-	// If we're back at main, clear sub pages
 	name2, _ := pages.GetFrontPage()
 	if name2 == "main" {
 		pages.RemovePage("sub")
+	}
+	// Restore focus to whatever page is now front.
+	if frontName, front := pages.GetFrontPage(); front != nil {
+		app.SetFocus(front)
+		_ = frontName
 	}
 }
 
@@ -87,19 +92,16 @@ func hintBar(hint string) tview.Primitive {
 		SetText("  " + hint)
 }
 
-// wrapWithHint wraps a primitive with a footer hint bar and wires Esc.
+// wrapWithHint wraps a primitive with a footer hint bar.
+// Esc is handled by wireEsc on the inner widget — NOT on the Flex,
+// because Flex.SetInputCapture intercepts arrow keys and breaks navigation.
 func wrapWithHint(p tview.Primitive, hint string) tview.Primitive {
 	hintView := hintBar(hint)
 	flex := tview.NewFlex().SetDirection(tview.FlexRow).
 		AddItem(p, 0, 1, true).
 		AddItem(hintView, 1, 0, false)
-	flex.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
-		if event.Key() == tcell.KeyEscape {
-			goBack()
-			return nil
-		}
-		return event
-	})
+	// Wire Esc on inner widget so Flex doesn't steal arrow keys.
+	wireEsc(p)
 	return flex
 }
 
@@ -133,13 +135,6 @@ func wrapTable(t *tview.Table) tview.Primitive {
 	flex := tview.NewFlex().SetDirection(tview.FlexRow).
 		AddItem(t, 0, 1, true).
 		AddItem(hint, 1, 0, false)
-	flex.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
-		if event.Key() == tcell.KeyEscape {
-			goBack()
-			return nil
-		}
-		return event
-	})
 	return flex
 }
 
@@ -507,9 +502,16 @@ func showPermForm(name string, onSubmit func(perms string)) {
 		}
 	})
 
-	list.SetBorder(true).SetTitle(fmt.Sprintf(colorTitle+" Permissions for [%s] ", name)).SetTitleAlign(tview.AlignCenter)
+	list.SetBorder(true).
+		SetTitle(fmt.Sprintf(colorTitle+" Permissions for [%s] ", name)).
+		SetTitleAlign(tview.AlignCenter)
 	wireEsc(list)
-	pages.AddAndSwitchToPage("perms", wrapWithHint(list, fmt.Sprintf("%s↑↓%s navigate   %sEnter%s toggle   %sEsc%s cancel", colorKey, colorReset, colorKey, colorReset, colorKey, colorReset)), true)
+	hint := hintBar(fmt.Sprintf("%s↑↓%s navigate   %sEnter%s toggle   %sEsc%s cancel", colorKey, colorReset, colorKey, colorReset, colorKey, colorReset))
+	permFlex := tview.NewFlex().SetDirection(tview.FlexRow).
+		AddItem(list, 0, 1, true).
+		AddItem(hint, 1, 0, false)
+	pages.AddAndSwitchToPage("perms", permFlex, true)
+	app.SetFocus(list)
 }
 
 // ── Proxy ─────────────────────────────────────────────────────────────────
