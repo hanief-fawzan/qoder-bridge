@@ -452,46 +452,63 @@ func apiKeyTableView() tview.Primitive {
 // allPerms lists all available permissions.
 var allPerms = []string{"chat", "models", "status", "quota", "logs", "combos"}
 
-// showPermForm shows a checkbox form for selecting permissions.
+// showPermForm shows a list for selecting permissions.
+// ↑↓ navigate, Enter/Space to toggle, Apply to save, Cancel to abort.
 // Empty selection = all permissions.
 func showPermForm(name string, onSubmit func(perms string)) {
-	form := tview.NewForm()
 	selected := map[string]bool{}
 	for _, p := range allPerms {
 		selected[p] = true // default: all checked
 	}
-	for _, p := range allPerms {
-		perm := p // capture
-		form.AddCheckbox(perm, true, func(checked bool) {
-			selected[perm] = checked
-		})
-	}
-	form.AddButton("OK", func() {
-		var chosen []string
+
+	var rebuild func() tview.Primitive
+	rebuild = func() tview.Primitive {
+		list := tview.NewList()
 		for _, p := range allPerms {
-			if selected[p] {
-				chosen = append(chosen, p)
+			perm := p // capture
+			checked := selected[perm]
+			icon := "✗"
+			iconColor := colorRed
+			if checked {
+				icon = "✓"
+				iconColor = colorGreen
 			}
+			list.AddItem(fmt.Sprintf("  %s%s%s %s", iconColor, icon, colorReset, perm), "", 0, nil)
 		}
-		perms := ""
-		if len(chosen) < len(allPerms) {
-			perms = strings.Join(chosen, ",")
-		}
-		pages.RemovePage("perms")
-		onSubmit(perms)
-	})
-	form.AddButton("Cancel", func() {
-		pages.RemovePage("perms")
-	})
-	form.SetBorder(true).SetTitle(fmt.Sprintf(colorTitle+" Permissions for [%s] ", name)).SetTitleAlign(tview.AlignCenter)
-	form.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
-		if event.Key() == tcell.KeyEscape {
+		list.AddItem(colorGreen+"  ✓  Apply"+colorReset, "Save permissions", 'a', func() {
+			var chosen []string
+			for _, p := range allPerms {
+				if selected[p] {
+					chosen = append(chosen, p)
+				}
+			}
+			perms := ""
+			if len(chosen) < len(allPerms) {
+				perms = strings.Join(chosen, ",")
+			}
 			pages.RemovePage("perms")
-			return nil
-		}
-		return event
-	})
-	pages.AddAndSwitchToPage("perms", wrapWithHint(form, fmt.Sprintf("%sTab%s navigate   %sSpace%s toggle   %sEnter%s confirm", colorKey, colorReset, colorKey, colorReset, colorKey, colorReset)), true)
+			onSubmit(perms)
+		})
+		list.AddItem(colorRed+"  ✗  Cancel"+colorReset, "Discard changes", 'c', func() {
+			pages.RemovePage("perms")
+		})
+
+		// Enter/Space toggles the focused permission item
+		list.SetSelectedFunc(func(idx int, mainText, _ string, _ rune) {
+			if idx < len(allPerms) {
+				selected[allPerms[idx]] = !selected[allPerms[idx]]
+				// Rebuild list to reflect new state
+				pages.RemovePage("perms")
+				pages.AddAndSwitchToPage("perms", wrapWithHint(rebuild(), fmt.Sprintf("%s↑↓%s navigate   %sEnter%s toggle   %sEsc%s cancel", colorKey, colorReset, colorKey, colorReset, colorKey, colorReset)), true)
+			}
+		})
+
+		list.SetBorder(true).SetTitle(fmt.Sprintf(colorTitle+" Permissions for [%s] ", name)).SetTitleAlign(tview.AlignCenter)
+		wireEsc(list)
+		return wrapWithHint(list, fmt.Sprintf("%s↑↓%s navigate   %sEnter%s toggle   %sEsc%s cancel", colorKey, colorReset, colorKey, colorReset, colorKey, colorReset))
+	}
+
+	pages.AddAndSwitchToPage("perms", rebuild(), true)
 }
 
 // ── Proxy ─────────────────────────────────────────────────────────────────

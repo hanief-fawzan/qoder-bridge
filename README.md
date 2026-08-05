@@ -186,6 +186,21 @@ API key auth is **off by default** (open access). Configure via TUI:
 
 Keys stored in SQLite. Disabled keys are treated as nonexistent for auth.
 
+### Per-Key Permissions
+
+Each API key can be restricted to specific endpoints. During generation or via TUI → API Keys → select key → Edit Permissions:
+
+| Permission | Endpoint |
+|------------|----------|
+| `chat` | `/v1/chat/completions` |
+| `models` | `/v1/models` |
+| `status` | `/v1/status` |
+| `quota` | `/v1/quota` |
+| `logs` | `/v1/logs` |
+| `combos` | `/v1/combos` |
+
+All permissions enabled by default. Uncheck to restrict. TUI uses ↑↓ navigate, Enter to toggle, Apply to save.
+
 ---
 
 ## 📦 Combo Models
