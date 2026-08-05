@@ -164,12 +164,25 @@ Full SSE streaming with:
 
 ## 🔑 Auth (optional)
 
-API key auth is **off by default**. Configure via TUI:
+API key auth is **off by default** (open access). Configure via TUI:
 
 1. Open TUI → **API Keys** menu
-2. Generate a key
-3. Toggle global auth **on**
+2. **Generate** a new key (auto-enables auth)
+3. Or toggle **Require API Key** ON/OFF manually
 4. Client sends `Authorization: Bearer sk-xxx`
+
+**When ON**: ALL endpoints except `/health` require a valid Bearer token.
+**When OFF**: open access, no key needed.
+
+| Endpoint | Auth OFF | Auth ON |
+|----------|----------|---------|
+| `/health` | ✅ public | ✅ public |
+| `/v1/chat/completions` | ✅ open | 🔒 Bearer required |
+| `/v1/models` | ✅ open | 🔒 Bearer required |
+| `/v1/status` | ✅ open | 🔒 Bearer required |
+| `/v1/quota` | ✅ open | 🔒 Bearer required |
+| `/v1/logs` | ✅ open | 🔒 Bearer required |
+| `/v1/combos` | ✅ open | 🔒 Bearer required |
 
 Keys stored in SQLite. Disabled keys are treated as nonexistent for auth.
 
@@ -205,6 +218,7 @@ OpenAI SSE → Client
 
 ### 🔒 Security
 
+- **Auth middleware**: all endpoints except `/health` gated by Bearer toggle (TUI)
 - Slowloris protection: `ReadHeaderTimeout: 10s`
 - Idle connection cleanup: `IdleTimeout: 120s`
 - Body size limit: 10MB (returns 413)
