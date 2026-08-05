@@ -1319,6 +1319,14 @@ func callQoder(ctx context.Context, pat, modelKey string, messages []ChatMessage
 		}
 	}
 
+	// 9. Detect empty response — Qoder returned nothing usable.
+	if len(allToolCalls) == 0 && strings.TrimSpace(cleanText) == "" {
+		return nil, &UpstreamError{
+			StatusCode: 502,
+			Body:       fmt.Sprintf(`{"error":"empty_response","model":"%s","message":"Qoder returned empty response (0 tokens). Possible causes: model unavailable, quota exhausted, or upstream timeout."}`, modelKey),
+		}
+	}
+
 	return &ChatResult{Text: cleanText, ToolCalls: allToolCalls, RequestID: reqID}, nil
 }
 

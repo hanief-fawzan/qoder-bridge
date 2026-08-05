@@ -49,6 +49,63 @@ var (
 	startTime    = time.Now()        // server start time for uptime tracking
 )
 
+// ── Log Ring Buffer ─────────────────────────────────────────────────────────
+
+type logRing struct {
+	mu   sync.Mutex
+	buf  []string
+	pos  int
+	size int
+	full bool
+}
+
+var ringLog = &logRing{buf: make([]string, 500), size: 500}
+
+func (l *logRing) Write(p []byte) (int, error) {
+	s := strings.TrimSpace(string(p))
+	if s == "" {
+		return len(p), nil
+	}
+	l.mu.Lock()
+	l.buf[l.pos] = s
+	l.pos = (l.pos + 1) % l.size
+	if l.pos == 0 {
+		l.full = true
+	}
+	l.mu.Unlock()
+	return len(p), nil
+}
+
+func (l *logRing) Lines(n int) []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	total := l.pos
+	if l.full {
+		total = l.size
+	}
+	if n <= 0 || n > total {
+		n = total
+	}
+	out := make([]string, n)
+	start := (l.pos - n + l.size) % l.size
+	for i := 0; i < n; i++ {
+		out[i] = l.buf[(start+i)%l.size]
+	}
+	return out
+}
+
+// ringBufWriter sends to both stderr and ring buffer.
+type ringBufWriter struct {
+	ring *logRing
+	orig *os.File
+}
+
+func (t *ringBufWriter) Write(p []byte) (int, error) {
+	t.orig.Write(p)
+	t.ring.Write(p)
+	return len(p), nil
+}
+
 // ── Models ──────────────────────────────────────────────────────────────────
 
 // Known Qoder tier models (auto-routed by Qoder infrastructure).
@@ -424,6 +481,21 @@ func handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	json.NewEncoder(w).Encode(resp)
+}
+
+func handleLogs(w http.ResponseWriter, r *http.Request) {
+	n := 50
+	if s := r.URL.Query().Get("n"); s != "" {
+		if v, err := fmt.Sscanf(s, "%d", &n); err == nil && v == 1 {
+			// ok
+		}
+	}
+	lines := ringLog.Lines(n)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"total": len(lines),
+		"lines": lines,
+	})
 }
 
 func handleModels(w http.ResponseWriter, r *http.Request) {
@@ -2029,8 +2101,13 @@ func runServe(args []string) {
 	mux.HandleFunc("/v1/quota", handleQuota)
 	mux.HandleFunc("/v1/combos", handleCombos)
 	mux.HandleFunc("/v1/status", handleStatus)
+	mux.HandleFunc("/v1/logs", handleLogs)
 
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
+
+	// Tee log output to ring buffer so /v1/logs works.
+	log.SetOutput(&ringBufWriter{ring: ringLog, orig: os.Stderr})
+
 	log.Printf("")
 	log.Printf("qoder-bridge (cosy-pure-go)")
 	log.Printf("  ready on %s", addr)
