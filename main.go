@@ -1516,6 +1516,12 @@ func runWithPATRotation(ctx context.Context, pool *PATPool, modelKey string, mes
 			pool.Cooldown(pat, 2*time.Minute)
 			log.Printf("qd %s: PAT %s in cooldown for 2m (queue/rate-limit)", modelKey, maskPAT(pat))
 		}
+		// Cooldown on empty response — PAT may be exhausted or model unavailable.
+		// Short cooldown (1m) since it might be temporary.
+		if isEmptyResponseError(lastErr) {
+			pool.Cooldown(pat, 1*time.Minute)
+			log.Printf("qd %s: PAT %s in cooldown for 1m (empty response)", modelKey, maskPAT(pat))
+		}
 		// Retrying after streaming bytes would concatenate two generations.
 		// Also stop if error is not retryable (e.g. pricing/quota limit).
 		if emitted || !isRetryableError(lastErr) || ctx.Err() != nil {
@@ -1656,6 +1662,15 @@ func isRetryableError(err error) bool {
 	return true
 }
 
+// isEmptyResponseError returns true for 502 empty response errors.
+func isEmptyResponseError(err error) bool {
+	var ue *UpstreamError
+	if errors.As(err, &ue) {
+		return ue.StatusCode == 502 && strings.Contains(ue.Body, "empty_response")
+	}
+	return false
+}
+
 // ── Model & combo resolution ────────────────────────────────────────────────
 
 // resolveModelKey strips prefixes and normalizes a model name.
@@ -1752,10 +1767,10 @@ func resolveContextWindow(req ChatRequest, modelKey string) int {
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
-var maskRe = regexp.MustCompile(`^(.{6}).*(.{4})$`)
+var maskRe = regexp.MustCompile(`^(.{4}).*(.{4})$`)
 
 func maskPAT(pat string) string {
-	if len(pat) > 14 {
+	if len(pat) > 10 {
 		return maskRe.ReplaceAllString(pat, "$1...$2")
 	}
 	return "***"
