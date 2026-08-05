@@ -199,10 +199,14 @@ func getModelConfig(cred *patCredential, modelKey string) (*modelConfig, error) 
 		if ok {
 			return mc, nil
 		}
-		// Model not in cache — but cache is fresh, so force refresh
-	} else {
-		modelConfigCacheMu.RUnlock()
+		// ponytail: cache is fresh and model isn't in it — re-fetching the
+		// whole list won't help (model genuinely absent upstream, e.g. preview
+		// keys). Fail fast instead of hammering the model-list endpoint on
+		// every request. Ceiling: a model added upstream mid-cache-window waits
+		// up to 10min; upgrade path = per-key negative cache if that bites.
+		return nil, fmt.Errorf("model %q not found in model list (%d models)", modelKey, len(modelConfigCache))
 	}
+	modelConfigCacheMu.RUnlock()
 
 	return fetchModelConfig(cred, modelKey, true)
 }
