@@ -114,14 +114,14 @@ var tierModels = []string{"auto", "ultimate", "performance", "efficient", "lite"
 // Known frontier models (mapped to real model names).
 var frontierModels = map[string]string{
 	"qmodel_38max":  "Qwen3.8-Max",
-	"qmodel_latest":  "Qwen3.7-Max",
-	"qmodel":         "Qwen3.7-Plus",
-	"kmodel_latest":  "Kimi-K3",
-	"kmodel":         "Kimi-K2.7-Code",
-	"gm51model":      "GLM-5.2",
-	"dmodel":         "DeepSeek-V4-Pro",
-	"dfmodel":        "DeepSeek-V4-Flash",
-	"mmodel":         "MiniMax-M3",
+	"qmodel_latest": "Qwen3.7-Max",
+	"qmodel":        "Qwen3.7-Plus",
+	"kmodel_latest": "Kimi-K3",
+	"kmodel":        "Kimi-K2.7-Code",
+	"gm51model":     "GLM-5.2",
+	"dmodel":        "DeepSeek-V4-Pro",
+	"dfmodel":       "DeepSeek-V4-Flash",
+	"mmodel":        "MiniMax-M3",
 }
 
 // Reverse map: display name -> internal key (built at init).
@@ -281,24 +281,24 @@ type ToolFunctionDef struct {
 }
 
 type ChatRequest struct {
-	Model          string        `json:"model"`
-	Messages       []ChatMessage `json:"messages"`
-	Stream         bool          `json:"stream"`
-	MaxTokens      int           `json:"max_tokens,omitempty"`
-	MaxCompletionTokens int        `json:"max_completion_tokens,omitempty"`
-	Tools          []ToolDef     `json:"tools,omitempty"`
-	ToolChoice     interface{}   `json:"tool_choice,omitempty"`
-	ThinkingEffort string        `json:"thinking_effort,omitempty"`     // low, medium, high, xhigh
-	ContextWindow  int           `json:"context_window,omitempty"`      // 200000, 400000, 1000000
-	ReasoningEffort string       `json:"reasoning_effort,omitempty"`    // Hermes sends this (OpenAI standard)
-	StreamOptions  *StreamOptions `json:"stream_options,omitempty"`     // {include_usage: true}
-	Temperature    *float64      `json:"temperature,omitempty"`
-	TopP           *float64      `json:"top_p,omitempty"`
-	Stop           interface{}   `json:"stop,omitempty"`
-	User           string        `json:"user,omitempty"`
-	Seed           *int          `json:"seed,omitempty"`
-	N              *int          `json:"n,omitempty"`
-	ResponseFormat interface{}   `json:"response_format,omitempty"`
+	Model               string         `json:"model"`
+	Messages            []ChatMessage  `json:"messages"`
+	Stream              bool           `json:"stream"`
+	MaxTokens           int            `json:"max_tokens,omitempty"`
+	MaxCompletionTokens int            `json:"max_completion_tokens,omitempty"`
+	Tools               []ToolDef      `json:"tools,omitempty"`
+	ToolChoice          interface{}    `json:"tool_choice,omitempty"`
+	ThinkingEffort      string         `json:"thinking_effort,omitempty"`  // low, medium, high, xhigh
+	ContextWindow       int            `json:"context_window,omitempty"`   // 200000, 400000, 1000000
+	ReasoningEffort     string         `json:"reasoning_effort,omitempty"` // Hermes sends this (OpenAI standard)
+	StreamOptions       *StreamOptions `json:"stream_options,omitempty"`   // {include_usage: true}
+	Temperature         *float64       `json:"temperature,omitempty"`
+	TopP                *float64       `json:"top_p,omitempty"`
+	Stop                interface{}    `json:"stop,omitempty"`
+	User                string         `json:"user,omitempty"`
+	Seed                *int           `json:"seed,omitempty"`
+	N                   *int           `json:"n,omitempty"`
+	ResponseFormat      interface{}    `json:"response_format,omitempty"`
 }
 
 // StreamOptions mirrors OpenAI's stream_options field. When set with
@@ -367,19 +367,20 @@ type patInfo struct {
 }
 
 type StatusResponse struct {
-	Uptime      string    `json:"uptime"`
-	Engine      string    `json:"engine"`
-	Proxy       string    `json:"proxy"`
-	ProxyCount  int       `json:"proxy_count"`
-	EgressIP    string    `json:"egress_ip"`
-	DBPath      string    `json:"db_path"`
-	DBWorking   bool      `json:"db_working"`
-	DBSize      string    `json:"db_size"`
-	LogCount    int64     `json:"log_count"`
-	PATStrategy string    `json:"pat_strategy"`
-	PATCount    int       `json:"pat_count"`
-	PATs        []patInfo `json:"pats"`
-	Combos      []string  `json:"combos"`
+	Uptime         string    `json:"uptime"`
+	Engine         string    `json:"engine"`
+	Proxy          string    `json:"proxy"`
+	ProxyCount     int       `json:"proxy_count"`
+	EgressIP       string    `json:"egress_ip"`
+	RequestDelayMS int       `json:"request_delay_ms"`
+	DBPath         string    `json:"db_path"`
+	DBWorking      bool      `json:"db_working"`
+	DBSize         string    `json:"db_size"`
+	LogCount       int64     `json:"log_count"`
+	PATStrategy    string    `json:"pat_strategy"`
+	PATCount       int       `json:"pat_count"`
+	PATs           []patInfo `json:"pats"`
+	Combos         []string  `json:"combos"`
 }
 
 // Egress IP cached for 5 minutes — checking api.ipify.org on every
@@ -437,14 +438,15 @@ func handleStatus(w http.ResponseWriter, r *http.Request) {
 
 	pats := patPool.All()
 	resp := StatusResponse{
-		Uptime:      time.Since(startTime).Round(time.Second).String(),
-		Engine:      "pure Go COSY",
-		DBPath:      dbLocation(),
-		DBWorking:   db != nil,
-		PATStrategy: patPool.strategy,
-		PATCount:    len(pats),
-		Proxy:       getProxyInfo(),
-		ProxyCount:  proxyCount(),
+		Uptime:         time.Since(startTime).Round(time.Second).String(),
+		Engine:         "pure Go COSY",
+		DBPath:         dbLocation(),
+		DBWorking:      db != nil,
+		PATStrategy:    patPool.strategy,
+		PATCount:       len(pats),
+		Proxy:          getProxyInfo(),
+		ProxyCount:     proxyCount(),
+		RequestDelayMS: requestDelay,
 	}
 
 	// Egress IP — cached for 5 minutes (see fetchEgressIP).
@@ -525,7 +527,7 @@ func handleModels(w http.ResponseWriter, r *http.Request) {
 		models = append(models, ModelEntry{
 			ID: frontierModels[k], Object: "model", Created: 1, OwnedBy: "qoder",
 			ContextLength: modelContextSize(k),
-			Name: k,
+			Name:          k,
 		})
 	}
 
@@ -540,7 +542,7 @@ func handleModels(w http.ResponseWriter, r *http.Request) {
 			models = append(models, ModelEntry{
 				ID: "qd/combo-" + name, Object: "model", Created: 1, OwnedBy: "qoder-combo",
 				ContextLength: 200000,
-				Name: "combo-" + name,
+				Name:          "combo-" + name,
 			})
 		}
 	}
@@ -588,8 +590,8 @@ func handleCombos(w http.ResponseWriter, r *http.Request) {
 //
 // Single source of truth: the api_keys DB table + globalEnabled flag.
 //
-//   • globalEnabled = true → Bearer required, must match an enabled row.
-//   • globalEnabled = false → open access, no Bearer required.
+//   - globalEnabled = true → Bearer required, must match an enabled row.
+//   - globalEnabled = false → open access, no Bearer required.
 //
 // Disabled rows in the table do NOT count as valid bearers (treat as
 // nonexistent). A row whose enabled column is 0 is invisible to auth.
@@ -597,7 +599,7 @@ func handleCombos(w http.ResponseWriter, r *http.Request) {
 // generateKey() automatically flips globalEnabled ON so the freshly
 // issued credential is actually demanded.
 var (
-	globalEnabled bool   // master switch (api_key_enabled in config)
+	globalEnabled bool // master switch (api_key_enabled in config)
 	authMu        sync.RWMutex
 )
 
@@ -967,7 +969,7 @@ func handleNonStream(w http.ResponseWriter, r *http.Request, req ChatRequest, mo
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(502)
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"error":   map[string]interface{}{"message": fmt.Sprintf("Qoder returned empty response for model '%s'. Possible causes: model unavailable, quota exhausted, or upstream timeout.", modelKey)},
+			"error": map[string]interface{}{"message": fmt.Sprintf("Qoder returned empty response for model '%s'. Possible causes: model unavailable, quota exhausted, or upstream timeout.", modelKey)},
 		})
 		return
 	}
@@ -1623,7 +1625,7 @@ func runWithPATRotation(ctx context.Context, pool *PATPool, modelKey string, mes
 				retryMsgs := make([]ChatMessage, len(messages))
 				copy(retryMsgs, messages)
 				retryMsgs = append(retryMsgs, ChatMessage{
-					Role:    "user",
+					Role: "user",
 					Content: "You MUST call one of these tools NOW: [" + toolList + "]. " +
 						"Output ONLY a ```json block with {\"tool_calls\": [{\"name\": \"...\", \"arguments\": {...}}]}. " +
 						"Do NOT explain. Do NOT say you don't have tools. Just output the JSON block.",
@@ -1723,8 +1725,8 @@ done:
 		Error:            errMsg,
 		LatencyMs:        latency,
 		ClientIP:         clientIP,
-				APIKey:           maskAPIKey(apikey),
-			})
+		APIKey:           maskAPIKey(apikey),
+	})
 
 	proxyLabel := getProxyInfo()
 	if lastErr != nil {
@@ -2340,11 +2342,11 @@ func runServe(args []string) {
 	log.Printf("  engine:  pure Go COSY (no qodercli)")
 	log.Printf("  proxy:   %s", getProxyInfo())
 	if authRequired() {
-			log.Printf("  auth:    required (Bearer sk-* key)")
-		} else {
-			log.Printf("  auth:    open access (no key required)")
-		}
-		log.Printf("ready to accept connections.")
+		log.Printf("  auth:    required (Bearer sk-* key)")
+	} else {
+		log.Printf("  auth:    open access (no key required)")
+	}
+	log.Printf("ready to accept connections.")
 
 	// Handle graceful shutdown
 	sigCh := make(chan os.Signal, 1)
