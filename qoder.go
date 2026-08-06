@@ -426,6 +426,8 @@ func fetchQuota(pat string) QuotaInfo {
 		return QuotaInfo{PAT: maskPAT(pat), Error: fmt.Sprintf("%d: %s", resp.StatusCode, string(b))}
 	}
 
+	log.Printf("quota raw response for %s: %s", maskPAT(pat), string(b))
+
 	// Qoder API returns: {userQuota: {total, used, remaining, unit}, expiresAt, totalUsagePercentage, isQuotaExceeded}
 	var q struct {
 		UserQuota struct {
