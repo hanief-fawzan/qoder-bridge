@@ -114,6 +114,7 @@ var tierModels = []string{"auto", "ultimate", "performance", "efficient", "lite"
 // Known frontier models (mapped to real model names).
 var frontierModels = map[string]string{
 	"qmodel_preview": "Qwen3.8-Max-Preview",
+	"qmodel_38max":   "Qwen3.8-Max",
 	"qmodel_latest":  "Qwen3.7-Max",
 	"qmodel":         "Qwen3.7-Plus",
 	"kmodel_latest":  "Kimi-K3",
