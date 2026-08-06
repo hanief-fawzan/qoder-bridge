@@ -1423,6 +1423,47 @@ func emitBufferedComboSSE(w http.ResponseWriter, flusher http.Flusher, id string
 	}
 }
 
+// startQuotaMonitor checks PAT quota every 5 minutes and cooldowns exhausted ones.
+// This prevents pricing 112 errors by skipping PATs that are already at limit.
+func startQuotaMonitor(pool *PATPool) {
+	// Run once at startup, then every 5 minutes.
+	run := func() {
+		pats := pool.All()
+		var wg sync.WaitGroup
+		for _, pat := range pats {
+			wg.Add(1)
+			go func(p string) {
+				defer wg.Done()
+				q := fetchQuota(p)
+				if q.Error != "" {
+					return // can't check, don't cooldown
+				}
+				if q.IsQuotaExceeded || (q.Limit > 0 && q.Used >= q.Limit) {
+					// Cooldown until reset date if available, otherwise 5 min.
+					cooldown := 5 * time.Minute
+					if q.ResetDate != "" {
+						if t, err := time.Parse(time.RFC3339, q.ResetDate); err == nil {
+							if d := time.Until(t); d > 0 {
+								cooldown = d
+							}
+						}
+					}
+					pool.Cooldown(p, cooldown)
+					log.Printf("quota: PAT %s exhausted (%d/%d), cooldown %v", maskPAT(p), q.Used, q.Limit, cooldown.Round(time.Minute))
+				}
+			}(pat)
+		}
+		wg.Wait()
+	}
+
+	run() // initial check
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+	for range ticker.C {
+		run()
+	}
+}
+
 func handleQuota(w http.ResponseWriter, r *http.Request) {
 	pats := patPool.All()
 	results := make([]QuotaInfo, len(pats))
@@ -1437,8 +1478,33 @@ func handleQuota(w http.ResponseWriter, r *http.Request) {
 	}
 	wg.Wait()
 
+	// ?detailed=true returns per-PAT breakdown. Default returns aggregate.
+	if r.URL.Query().Get("detailed") == "true" {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(results)
+		return
+	}
+
+	var totalUsed, totalRemaining, totalLimit int64
+	var exhaustedCount int
+	for _, q := range results {
+		totalUsed += q.Used
+		totalRemaining += q.Remaining
+		totalLimit += q.Limit
+		if q.IsQuotaExceeded || (q.Limit > 0 && q.Used >= q.Limit) {
+			exhaustedCount++
+		}
+	}
+	aggregate := map[string]interface{}{
+		"total_used":      totalUsed,
+		"total_remaining": totalRemaining,
+		"total_limit":     totalLimit,
+		"pat_count":       len(results),
+		"pat_active":      len(results) - exhaustedCount,
+		"pat_exhausted":   exhaustedCount,
+	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(results)
+	json.NewEncoder(w).Encode(aggregate)
 }
 
 // handleUpstreamModels dumps the raw model list from the Qoder API so we can
@@ -2277,6 +2343,10 @@ func runServe(args []string) {
 		removePID()
 		os.Exit(0)
 	}()
+
+	// Background quota checker: every 5 min, cooldown exhausted PATs
+	// so they're skipped before wasting a request attempt.
+	go startQuotaMonitor(patPool)
 
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("listen: %v", err)

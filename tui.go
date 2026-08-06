@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gdamore/tcell/v2"
@@ -77,6 +78,7 @@ const (
 	colorTitle  = "[#5f87ff]"
 	colorKey    = "[#ffaf00]"
 	colorGreen  = "[#5faf5f]"
+	colorYellow = "[#ffff00]"
 	colorRed    = "[#ff5f5f]"
 	colorDim    = "[#808080]"
 	colorReset  = "[white]"
@@ -237,6 +239,9 @@ func mainMenu() tview.Primitive {
 		}).
 		AddItem("  📋  Endpoints", "Show API endpoint URLs (copy-paste)", 'e', func() {
 			pushPage("sub", endpointsView())
+		}).
+		AddItem("  💰  Quota", "Per-PAT credit usage & status", 'Q', func() {
+			pushPage("sub", quotaView())
 		}).
 		AddItem("  ⏱   Request Delay", "Anti-ban delay (0-N ms jitter)", 'd', func() {
 			pushPage("sub", delayMenu())
@@ -581,6 +586,59 @@ func domainMenu() tview.Primitive {
 	list.SetBorder(true).SetTitle(colorTitle + " Domain ").SetTitleAlign(tview.AlignCenter)
 	wireEsc(list)
 	return wrapWithHint(list, fmt.Sprintf("%s↑↓%s navigate   %sEnter%s select   %sEsc%s back", colorKey, colorReset, colorKey, colorReset, colorKey, colorReset))
+}
+
+// ── Quota ────────────────────────────────────────────────────────────────────
+
+func quotaView() tview.Primitive {
+	pats := patPool.All()
+	results := make([]QuotaInfo, len(pats))
+
+	// Fetch quota for all PATs concurrently.
+	var wg sync.WaitGroup
+	for i, pat := range pats {
+		wg.Add(1)
+		go func(idx int, p string) {
+			defer wg.Done()
+			results[idx] = fetchQuota(p)
+		}(i, pat)
+	}
+	wg.Wait()
+
+	list := tview.NewList()
+	var totalUsed, totalRemaining, totalLimit int64
+	var exhausted int
+	for _, q := range results {
+		totalUsed += q.Used
+		totalRemaining += q.Remaining
+		totalLimit += q.Limit
+		status := colorGreen + "✅" + colorReset
+		if q.IsQuotaExceeded || (q.Limit > 0 && q.Used >= q.Limit) {
+			status = colorRed + "❌" + colorReset
+			exhausted++
+		}
+		if q.Error != "" {
+			status = colorYellow + "⚠️" + colorReset
+		}
+		label := fmt.Sprintf("  %s  %s  %s%3d%s / %d", status, q.PAT, colorAccent, q.Used, colorReset, q.Limit)
+		detail := fmt.Sprintf("remaining %d  •  %s", q.Remaining, q.ResetDate[:10])
+		if q.Error != "" {
+			detail = q.Error
+		}
+		list.AddItem(label, detail, 0, nil)
+	}
+
+	// Summary line.
+	pct := 0.0
+	if totalLimit > 0 {
+		pct = float64(totalUsed) / float64(totalLimit) * 100
+	}
+	list.AddItem(fmt.Sprintf("  📊  Total: %d / %d (%.0f%%)  —  %d active, %d exhausted",
+		totalUsed, totalLimit, pct, len(results)-exhausted, exhausted), "", 0, nil)
+	list.AddItem("  ← Back", "Esc", 'b', func() { goBack() })
+	list.SetBorder(true).SetTitle(colorTitle + " Quota ").SetTitleAlign(tview.AlignCenter)
+	wireEsc(list)
+	return wrapWithHint(list, fmt.Sprintf("%s↑↓%s navigate   %sEsc%s back", colorKey, colorReset, colorKey, colorReset))
 }
 
 // ── Endpoints ─────────────────────────────────────────────────────────────
