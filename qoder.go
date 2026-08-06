@@ -393,14 +393,15 @@ func fetchModelConfig(cred *patCredential, modelKey string, retry bool) (*modelC
 // ── Quota ───────────────────────────────────────────────────────────────────
 
 type QuotaInfo struct {
-	PAT                   string `json:"pat"`
-	Used                  int64  `json:"used"`
-	Remaining             int64  `json:"remaining"`
-	Limit                 int64  `json:"limit"`
-	ResetDate             string `json:"reset_date,omitempty"`
-	TotalUsagePercent     int    `json:"total_usage_percent,omitempty"`
-	IsQuotaExceeded       bool   `json:"is_quota_exceeded,omitempty"`
-	Error                 string `json:"error,omitempty"`
+	PAT                   string                 `json:"pat"`
+	Used                  int64                  `json:"used"`
+	Remaining             int64                  `json:"remaining"`
+	Limit                 int64                  `json:"limit"`
+	ResetDate             string                 `json:"reset_date,omitempty"`
+	TotalUsagePercent     int                    `json:"total_usage_percent,omitempty"`
+	IsQuotaExceeded       bool                   `json:"is_quota_exceeded,omitempty"`
+	Error                 string                 `json:"error,omitempty"`
+	RawResponse           map[string]interface{} `json:"raw_response,omitempty"`
 }
 
 func fetchQuota(pat string) QuotaInfo {
@@ -426,9 +427,12 @@ func fetchQuota(pat string) QuotaInfo {
 		return QuotaInfo{PAT: maskPAT(pat), Error: fmt.Sprintf("%d: %s", resp.StatusCode, string(b))}
 	}
 
-	log.Printf("quota raw response for %s: %s", maskPAT(pat), string(b))
-
 	// Qoder API returns: {userQuota: {total, used, remaining, unit}, expiresAt, totalUsagePercentage, isQuotaExceeded}
+	var raw map[string]interface{}
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return QuotaInfo{PAT: maskPAT(pat), Error: fmt.Sprintf("json parse: %v", err)}
+	}
+
 	var q struct {
 		UserQuota struct {
 			Total     int64 `json:"total"`
@@ -454,6 +458,7 @@ func fetchQuota(pat string) QuotaInfo {
 		ResetDate:         resetDate,
 		TotalUsagePercent: int(q.TotalUsagePercentage),
 		IsQuotaExceeded:   q.IsQuotaExceeded,
+		RawResponse:       raw,
 	}
 }
 
