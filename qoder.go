@@ -393,15 +393,14 @@ func fetchModelConfig(cred *patCredential, modelKey string, retry bool) (*modelC
 // ── Quota ───────────────────────────────────────────────────────────────────
 
 type QuotaInfo struct {
-	PAT                   string                 `json:"pat"`
-	Used                  int64                  `json:"used"`
-	Remaining             int64                  `json:"remaining"`
-	Limit                 int64                  `json:"limit"`
-	ResetDate             string                 `json:"reset_date,omitempty"`
-	TotalUsagePercent     int                    `json:"total_usage_percent,omitempty"`
-	IsQuotaExceeded       bool                   `json:"is_quota_exceeded,omitempty"`
-	Error                 string                 `json:"error,omitempty"`
-	RawResponse           map[string]interface{} `json:"raw_response,omitempty"`
+	PAT               string `json:"pat"`
+	Used              int64  `json:"used"`
+	Remaining         int64  `json:"remaining"`
+	Limit             int64  `json:"limit"`
+	ResetDate         string `json:"reset_date,omitempty"`
+	TotalUsagePercent int    `json:"total_usage_percent,omitempty"`
+	IsQuotaExceeded   bool   `json:"is_quota_exceeded,omitempty"`
+	Error             string `json:"error,omitempty"`
 }
 
 func fetchQuota(pat string) QuotaInfo {
@@ -428,37 +427,44 @@ func fetchQuota(pat string) QuotaInfo {
 	}
 
 	// Qoder API returns: {userQuota: {total, used, remaining, unit}, expiresAt, totalUsagePercentage, isQuotaExceeded}
+	// Parse into raw map first (known to work), then extract fields.
 	var raw map[string]interface{}
 	if err := json.Unmarshal(b, &raw); err != nil {
 		return QuotaInfo{PAT: maskPAT(pat), Error: fmt.Sprintf("json parse: %v", err)}
 	}
 
-	var q struct {
-		UserQuota struct {
-			Total     int64 `json:"total"`
-			Used      int64 `json:"used"`
-			Remaining int64 `json:"remaining"`
-		} `json:"userQuota"`
-		TotalUsagePercentage float64 `json:"totalUsagePercentage"`
-		IsQuotaExceeded       bool   `json:"isQuotaExceeded"`
-		ExpiresAt             int64  `json:"expiresAt"`
-	}
-	json.Unmarshal(b, &q)
-
+	var used, remaining, limit int64
 	var resetDate string
-	if q.ExpiresAt > 0 {
-		resetDate = time.UnixMilli(q.ExpiresAt).UTC().Format(time.RFC3339)
+	var totalPct float64
+	var exceeded bool
+
+	if uq, ok := raw["userQuota"].(map[string]interface{}); ok {
+		used, _ = uq["used"].(json.Number).Int64()
+		remaining, _ = uq["remaining"].(json.Number).Int64()
+		limit, _ = uq["total"].(json.Number).Int64()
+	}
+	if ea, ok := raw["expiresAt"].(json.Number); ok {
+		if ms, err := ea.Int64(); err == nil && ms > 0 {
+			resetDate = time.UnixMilli(ms).UTC().Format(time.RFC3339)
+		}
+	}
+	if pct, ok := raw["totalUsagePercentage"].(json.Number); ok {
+		if v, err := pct.Float64(); err == nil {
+			totalPct = v
+		}
+	}
+	if ex, ok := raw["isQuotaExceeded"].(bool); ok {
+		exceeded = ex
 	}
 
 	return QuotaInfo{
 		PAT:               maskPAT(pat),
-		Used:              q.UserQuota.Used,
-		Remaining:         q.UserQuota.Remaining,
-		Limit:             q.UserQuota.Total,
+		Used:              used,
+		Remaining:         remaining,
+		Limit:             limit,
 		ResetDate:         resetDate,
-		TotalUsagePercent: int(q.TotalUsagePercentage),
-		IsQuotaExceeded:   q.IsQuotaExceeded,
-		RawResponse:       raw,
+		TotalUsagePercent: int(totalPct),
+		IsQuotaExceeded:   exceeded,
 	}
 }
 
