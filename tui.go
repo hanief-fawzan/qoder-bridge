@@ -591,7 +591,22 @@ func domainMenu() tview.Primitive {
 // ── Quota ────────────────────────────────────────────────────────────────────
 
 func quotaView() tview.Primitive {
-	pats := patPool.All()
+	// TUI runs without daemon — patPool may be nil. Load PATs from .env.
+	var pats []string
+	if patPool != nil {
+		pats = patPool.All()
+	} else {
+		cfg := loadEnv("")
+		pats = cfg.pats
+	}
+	if len(pats) == 0 {
+		list := tview.NewList()
+		list.AddItem("  No PATs configured", "", 0, nil)
+		list.AddItem("  ← Back", "Esc", 'b', func() { goBack() })
+		list.SetBorder(true).SetTitle(colorTitle + " Quota ").SetTitleAlign(tview.AlignCenter)
+		wireEsc(list)
+		return wrapWithHint(list, fmt.Sprintf("%sEsc%s back", colorKey, colorReset))
+	}
 	results := make([]QuotaInfo, len(pats))
 
 	// Fetch quota for all PATs concurrently.
