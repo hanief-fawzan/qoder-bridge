@@ -393,12 +393,14 @@ func fetchModelConfig(cred *patCredential, modelKey string, retry bool) (*modelC
 // ── Quota ───────────────────────────────────────────────────────────────────
 
 type QuotaInfo struct {
-	PAT       string `json:"pat"`
-	Used      int64  `json:"used"`
-	Remaining int64  `json:"remaining"`
-	Limit     int64  `json:"limit"`
-	ResetDate string `json:"reset_date,omitempty"`
-	Error     string `json:"error,omitempty"`
+	PAT                   string `json:"pat"`
+	Used                  int64  `json:"used"`
+	Remaining             int64  `json:"remaining"`
+	Limit                 int64  `json:"limit"`
+	ResetDate             string `json:"reset_date,omitempty"`
+	TotalUsagePercent     int    `json:"total_usage_percent,omitempty"`
+	IsQuotaExceeded       bool   `json:"is_quota_exceeded,omitempty"`
+	Error                 string `json:"error,omitempty"`
 }
 
 func fetchQuota(pat string) QuotaInfo {
@@ -424,19 +426,32 @@ func fetchQuota(pat string) QuotaInfo {
 		return QuotaInfo{PAT: maskPAT(pat), Error: fmt.Sprintf("%d: %s", resp.StatusCode, string(b))}
 	}
 
+	// Qoder API returns: {userQuota: {total, used, remaining, unit}, expiresAt, totalUsagePercentage, isQuotaExceeded}
 	var q struct {
-		Used      int64  `json:"used"`
-		Remaining int64  `json:"remaining"`
-		Limit     int64  `json:"limit"`
-		ResetDate string `json:"reset_date"`
+		UserQuota struct {
+			Total     int64 `json:"total"`
+			Used      int64 `json:"used"`
+			Remaining int64 `json:"remaining"`
+		} `json:"userQuota"`
+		TotalUsagePercentage float64 `json:"totalUsagePercentage"`
+		IsQuotaExceeded       bool   `json:"isQuotaExceeded"`
+		ExpiresAt             int64  `json:"expiresAt"`
 	}
 	json.Unmarshal(b, &q)
+
+	var resetDate string
+	if q.ExpiresAt > 0 {
+		resetDate = time.UnixMilli(q.ExpiresAt).UTC().Format(time.RFC3339)
+	}
+
 	return QuotaInfo{
-		PAT:       maskPAT(pat),
-		Used:      q.Used,
-		Remaining: q.Remaining,
-		Limit:     q.Limit,
-		ResetDate: q.ResetDate,
+		PAT:               maskPAT(pat),
+		Used:              q.UserQuota.Used,
+		Remaining:         q.UserQuota.Remaining,
+		Limit:             q.UserQuota.Total,
+		ResetDate:         resetDate,
+		TotalUsagePercent: int(q.TotalUsagePercentage),
+		IsQuotaExceeded:   q.IsQuotaExceeded,
 	}
 }
 
