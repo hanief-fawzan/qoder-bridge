@@ -438,21 +438,42 @@ func fetchQuota(pat string) QuotaInfo {
 	var totalPct float64
 	var exceeded bool
 
+	// ponytail: json.Unmarshal into map produces float64 for numbers, not json.Number.
+	// Helper to safely extract int64 from a map value.
+	getInt64 := func(m map[string]interface{}, key string) int64 {
+		if v, ok := m[key]; ok {
+			switch n := v.(type) {
+			case float64:
+				return int64(n)
+			case json.Number:
+				i, _ := n.Int64()
+				return i
+			}
+		}
+		return 0
+	}
+	getFloat64 := func(m map[string]interface{}, key string) float64 {
+		if v, ok := m[key]; ok {
+			switch n := v.(type) {
+			case float64:
+				return n
+			case json.Number:
+				f, _ := n.Float64()
+				return f
+			}
+		}
+		return 0
+	}
+
 	if uq, ok := raw["userQuota"].(map[string]interface{}); ok {
-		used, _ = uq["used"].(json.Number).Int64()
-		remaining, _ = uq["remaining"].(json.Number).Int64()
-		limit, _ = uq["total"].(json.Number).Int64()
+		used = getInt64(uq, "used")
+		remaining = getInt64(uq, "remaining")
+		limit = getInt64(uq, "total")
 	}
-	if ea, ok := raw["expiresAt"].(json.Number); ok {
-		if ms, err := ea.Int64(); err == nil && ms > 0 {
-			resetDate = time.UnixMilli(ms).UTC().Format(time.RFC3339)
-		}
+	if ms := getInt64(raw, "expiresAt"); ms > 0 {
+		resetDate = time.UnixMilli(ms).UTC().Format(time.RFC3339)
 	}
-	if pct, ok := raw["totalUsagePercentage"].(json.Number); ok {
-		if v, err := pct.Float64(); err == nil {
-			totalPct = v
-		}
-	}
+	totalPct = getFloat64(raw, "totalUsagePercentage")
 	if ex, ok := raw["isQuotaExceeded"].(bool); ok {
 		exceeded = ex
 	}
