@@ -10,3 +10,6 @@ data/
 *.log
 *.tmp
 dist/
+
+# runtime database
+.qoder-bridge/
