@@ -753,9 +753,9 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 	modelKey := resolveModelKey(modelInput)
 
-	// Resolve thinking effort (Hermes sends reasoning_effort, Qoder expects thinking_effort)
+	// Resolve thinking effort (explicit thinking_effort only — 9router wire parity)
 	req.ThinkingEffort = resolveThinkingEffort(req)
-	// Resolve context window (auto-set based on model tier if not specified)
+	// Resolve context window (explicit only — 9router wire parity)
 	req.ContextWindow = resolveContextWindow(req, modelKey)
 	// Resolve max_tokens from max_completion_tokens (OpenAI standard field)
 	if req.MaxTokens <= 0 && req.MaxCompletionTokens > 0 {
@@ -1867,15 +1867,19 @@ func resolveCombo(model string) ([]string, bool) {
 	return nil, false
 }
 
-// resolveThinkingEffort resolves thinking effort from multiple sources.
-// Priority: thinking_effort > reasoning_effort (Hermes OpenAI standard).
-// Maps "ultra" → "xhigh" (Qoder max).
+// resolveThinkingEffort forwards the client's explicit Qoder-native
+// thinking_effort value only.
+//
+// 9router wire parity: 9router's Qoder executor never sends thinking_effort.
+// This previously mapped the OpenAI-standard reasoning_effort field (Hermes
+// sends reasoning_effort:"ultra" from config) to Qoder's "xhigh", forcing a
+// maximal reasoning pass on every request — measured +minutes of TTFT on
+// large contexts vs 9router (user report: 7min vs 4min on summarize). The
+// model still thinks — and reasoning_content still streams — at Qoder's
+// default effort for is_reasoning models; clients that want to pin an
+// effort can set thinking_effort explicitly.
 func resolveThinkingEffort(req ChatRequest) string {
-	effort := req.ThinkingEffort
-	if effort == "" {
-		effort = req.ReasoningEffort
-	}
-	switch strings.ToLower(strings.TrimSpace(effort)) {
+	switch strings.ToLower(strings.TrimSpace(req.ThinkingEffort)) {
 	case "low":
 		return "low"
 	case "medium", "mid":
@@ -1889,30 +1893,14 @@ func resolveThinkingEffort(req ChatRequest) string {
 	}
 }
 
-// resolveContextWindow auto-sets context window based on model tier.
-// Source: https://docs.qoder.com/user-guide/chat/model-tier-selector
-// 200K=standard, 400K=extended, 1M=extreme
+// resolveContextWindow forwards the client's explicit context_window only.
+//
+// 9router wire parity: 9router never sends context_window; Qoder picks its
+// own default tier. Auto-injecting 200K/400K/1M per model tier altered
+// upstream behavior on every request and was part of the latency delta.
+// Clients that need a specific tier can set context_window explicitly.
 func resolveContextWindow(req ChatRequest, modelKey string) int {
-	if req.ContextWindow > 0 {
-		return req.ContextWindow
-	}
-	// Auto-detect by model tier
-	switch modelKey {
-	case "kmodel_latest", "kmodel": // Kimi — supports 1M
-		return 1000000
-	case "qmodel_latest", "qmodel": // Qwen3.7-Max/Plus — supports 400K
-		return 400000
-	case "dmodel", "dfmodel": // DeepSeek — supports 400K
-		return 400000
-	case "gm51model": // GLM-5.2 — supports 1M
-		return 1000000
-	case "mmodel": // MiniMax-M3 — 1M context
-		return 1000000
-	case "qmodel_preview": // Qwen3.8-Max-Preview — 400K
-		return 400000
-	default: // tier models (auto, ultimate, etc.) — standard 200K
-		return 200000
-	}
+	return req.ContextWindow
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────

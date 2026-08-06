@@ -366,8 +366,12 @@ func TestResolveThinkingEffort(t *testing.T) {
 		want string
 	}{
 		{ChatRequest{ThinkingEffort: "high"}, "high"},
-		{ChatRequest{ReasoningEffort: "ultra"}, "xhigh"},
-		{ChatRequest{ReasoningEffort: "medium"}, "medium"},
+		{ChatRequest{ThinkingEffort: "xhigh"}, "xhigh"},
+		{ChatRequest{ThinkingEffort: "medium"}, "medium"},
+		// reasoning_effort (OpenAI standard, sent by Hermes) must NOT be
+		// mapped to thinking_effort — 9router wire parity: forcing "xhigh"
+		// from "ultra" added minutes of TTFT on large contexts.
+		{ChatRequest{ReasoningEffort: "ultra"}, ""},
 		{ChatRequest{}, ""},
 	}
 	for _, tt := range tests {
@@ -379,23 +383,15 @@ func TestResolveThinkingEffort(t *testing.T) {
 }
 
 func TestResolveContextWindow(t *testing.T) {
-	tests := []struct {
-		model string
-		want  int
-	}{
-		{"kmodel_latest", 1000000},
-		{"dmodel", 400000},
-		{"auto", 200000},
-	}
-	for _, tt := range tests {
-		got := resolveContextWindow(ChatRequest{}, tt.model)
-		if got != tt.want {
-			t.Errorf("resolveContextWindow(%q) = %d, want %d", tt.model, got, tt.want)
-		}
-	}
-	got := resolveContextWindow(ChatRequest{ContextWindow: 500000}, "auto")
-	if got != 500000 {
+	// Explicit context window is forwarded verbatim.
+	if got := resolveContextWindow(ChatRequest{ContextWindow: 500000}, "auto"); got != 500000 {
 		t.Errorf("explicit context window: got %d, want 500000", got)
+	}
+	// No auto tier injection — 9router wire parity.
+	for _, model := range []string{"kmodel_latest", "dmodel", "auto", "qmodel_38max"} {
+		if got := resolveContextWindow(ChatRequest{}, model); got != 0 {
+			t.Errorf("resolveContextWindow(%q) = %d, want 0 (no auto tier)", model, got)
+		}
 	}
 }
 
@@ -915,7 +911,7 @@ func TestNormalizeMessages_HandlesObjectArguments(t *testing.T) {
 	// not a JSON string. The bridge must accept both — silently dropping
 	// to {} would erase user intent on tool calls.
 	msgs := []ChatMessage{{
-		Role: "assistant",
+		Role:    "assistant",
 		Content: "",
 		Extra: map[string]interface{}{
 			"tool_calls": []interface{}{
@@ -1004,7 +1000,6 @@ func TestParseMultipleBareObjects(t *testing.T) {
 		t.Errorf("expected terminal, got %q", calls[1].Function.Name)
 	}
 }
-
 
 func TestParseKimiToolFormat(t *testing.T) {
 	input := "I'll run that command for you.\n\n<Tool>terminal</Tool>"

@@ -621,24 +621,24 @@ func normalizeMessages(messages []ChatMessage, tools []ToolDef) ([]ChatMessage, 
 			fence
 		systemParts = append([]string{toolPrompt}, systemParts...)
 
-	// Append compact tool reminder to last user message.
-	// Models that skim system prompt but read user messages will see this.
-	for i := len(out) - 1; i >= 0; i-- {
-		if out[i].Role == "user" {
-			toolList := ""
-			for _, t := range tools {
-				if toolList != "" {
-					toolList += ", "
+		// Append compact tool reminder to last user message.
+		// Models that skim system prompt but read user messages will see this.
+		for i := len(out) - 1; i >= 0; i-- {
+			if out[i].Role == "user" {
+				toolList := ""
+				for _, t := range tools {
+					if toolList != "" {
+						toolList += ", "
+					}
+					toolList += t.Function.Name
 				}
-				toolList += t.Function.Name
+				out[i].Content = extractText(out[i].Content) +
+					"\n\n[Available tools: " + toolList + "] " +
+					"Respond with a ```json code block containing {\"tool_calls\": [{\"name\": \"...\", \"arguments\": {...}}]}. " +
+					"NEVER say you don't have tools."
+				break
 			}
-			out[i].Content = extractText(out[i].Content) +
-				"\n\n[Available tools: " + toolList + "] " +
-				"Respond with a ```json code block containing {\"tool_calls\": [{\"name\": \"...\", \"arguments\": {...}}]}. " +
-				"NEVER say you don't have tools."
-			break
 		}
-	}
 	}
 
 	return out, strings.Join(systemParts, "\n\n")
@@ -714,7 +714,7 @@ func truncate(s string, n int) string {
 }
 
 // Regex for ```json ... ``` blocks — compiled once at package level.
-// Supports: ```, ````, `````+ backticks. Also handles json, tool_call, function_call tags.
+// Supports: ```, ````, ```“+ backticks. Also handles json, tool_call, function_call tags.
 var jsonBlockRe = regexp.MustCompile("(?s)" + "`{3,}" + `(?:json|tool_call|function_call)?\s*\n?([\s\S]*?)\n?\s*` + "`{3,}")
 
 // Regex for <tool_call>...</tool_call> XML-style tool calls.
@@ -741,6 +741,7 @@ var kimiToolRe = regexp.MustCompile("(?s)<Tool>(\\S+?)</Tool>")
 //  1. ```json\n{"tool_calls": [...]}\n```  (preferred, matching qoder-proxy)
 //  2. Balanced JSON extraction with brace counting (bare JSON fallback)
 //  3. [assistant called tool: NAME with arguments: ARGS] (inline text format)
+//
 // Returns parsed tool_calls and clean text with tool_call content removed.
 func parseToolCallsFromText(text string) ([]ToolCall, string) {
 	// Format 0: <tool_call> XML-style (Qoder native when native tools disabled)
@@ -825,7 +826,9 @@ func parseToolCallsFromText(text string) ([]ToolCall, string) {
 	if kimiMatches := kimiToolRe.FindAllStringSubmatch(text, -1); len(kimiMatches) > 0 {
 		var calls []ToolCall
 		for _, m := range kimiMatches {
-			if len(m) < 2 { continue }
+			if len(m) < 2 {
+				continue
+			}
 			name := m[1]
 			calls = append(calls, ToolCall{
 				ID: generateCallID(), Type: "function",
@@ -1181,27 +1184,44 @@ func buildQoderRequestBody(modelKey string, messages []ChatMessage, maxTokens in
 		maxTokens = qoderMaxTokens
 	}
 
+	// 9router wire parity: only include thinking_effort / context_window when
+	// explicitly requested. Forcing thinking_effort:"xhigh" (mapped from the
+	// OpenAI-standard reasoning_effort:"ultra" that Hermes sends) made Qoder run
+	// a maximal reasoning pass before the first token — measured +minutes TTFT
+	// on large summarize contexts vs 9router, which sends neither field.
+	extra := map[string]interface{}{
+		"context":         []interface{}{},
+		"modelConfig":     map[string]interface{}{"key": modelKey, "is_reasoning": mc.IsReasoning},
+		"originalContent": lastUser,
+	}
+	if thinkingEffort != "" {
+		extra["thinking_effort"] = thinkingEffort
+	}
+	if contextWindow > 0 {
+		extra["context_window"] = contextWindow
+	}
+
 	payload := map[string]interface{}{
-		"request_id":      uuidString(),
-		"request_set_id":  recordID,
-		"chat_record_id":  recordID,
-		"session_id":      sessionID,
-		"stream":          true,
-		"chat_task":       "FREE_INPUT",
-		"is_reply":        true,
-		"is_retry":        false,
-		"source":          1,
-		"version":         "3",
-		"session_type":    "qodercli",
-		"agent_id":        "agent_common",
-		"task_id":         "common",
-		"code_language":   "",
-		"chat_prompt":     "",
-		"image_urls":      nil,
+		"request_id":       uuidString(),
+		"request_set_id":   recordID,
+		"chat_record_id":   recordID,
+		"session_id":       sessionID,
+		"stream":           true,
+		"chat_task":        "FREE_INPUT",
+		"is_reply":         true,
+		"is_retry":         false,
+		"source":           1,
+		"version":          "3",
+		"session_type":     "qodercli",
+		"agent_id":         "agent_common",
+		"task_id":          "common",
+		"code_language":    "",
+		"chat_prompt":      "",
+		"image_urls":       nil,
 		"aliyun_user_type": "",
-		"system":          systemText,
-		"messages":        normalized,
-		"tools":           []interface{}{}, // ponytail: don't send native tools to Qoder API.
+		"system":           systemText,
+		"messages":         normalized,
+		"tools":            []interface{}{}, // ponytail: don't send native tools to Qoder API.
 		// Qoder's native tool_call implementation doesn't populate function
 		// arguments — it emits tool_calls with arguments:"{}" empty.
 		// Instead, we inject a text-based tool protocol into the system prompt
@@ -1209,17 +1229,11 @@ func buildQoderRequestBody(modelKey string, messages []ChatMessage, maxTokens in
 		// This gives reliable tool calling with full arguments.
 		"parameters": map[string]interface{}{"max_tokens": maxTokens},
 		"chat_context": map[string]interface{}{
-			"chatPrompt":  "",
-			"imageUrls":   nil,
-			"extra": map[string]interface{}{
-				"context":         []interface{}{},
-				"modelConfig":     map[string]interface{}{"key": modelKey, "is_reasoning": mc.IsReasoning},
-				"originalContent": lastUser,
-				"thinking_effort": thinkingEffort,
-				"context_window":  contextWindow,
-			},
-			"features": []interface{}{},
-			"text":     lastUser,
+			"chatPrompt": "",
+			"imageUrls":  nil,
+			"extra":      extra,
+			"features":   []interface{}{},
+			"text":       lastUser,
 		},
 		"model_config": func() interface{} {
 			if mc.Raw != nil {
@@ -1250,9 +1264,9 @@ type ChatResult struct {
 
 // ToolCall represents a parsed tool call from Qoder's text response.
 type ToolCall struct {
-	ID        string      `json:"id"`
-	Type      string      `json:"type"`
-	Function  ToolCallFn  `json:"function"`
+	ID       string     `json:"id"`
+	Type     string     `json:"type"`
+	Function ToolCallFn `json:"function"`
 }
 
 type ToolCallFn struct {
