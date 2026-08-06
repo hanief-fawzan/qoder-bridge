@@ -113,8 +113,7 @@ var tierModels = []string{"auto", "ultimate", "performance", "efficient", "lite"
 
 // Known frontier models (mapped to real model names).
 var frontierModels = map[string]string{
-	"qmodel_preview": "Qwen3.8-Max-Preview",
-	"qmodel_38max":   "Qwen3.8-Max",
+	"qmodel_38max":  "Qwen3.8-Max",
 	"qmodel_latest":  "Qwen3.7-Max",
 	"qmodel":         "Qwen3.7-Plus",
 	"kmodel_latest":  "Kimi-K3",
@@ -884,7 +883,7 @@ func handleStream(w http.ResponseWriter, r *http.Request, req ChatRequest, model
 	}()
 	first := true
 
-	result, err := runWithPATRotation(r.Context(), patPool, modelKey, req.Messages, req.MaxTokens, func(text string) {
+	result, err := runWithPATRotation(r.Context(), patPool, modelKey, req.Messages, req.MaxTokens, func(sc StreamChunk) {
 		if first {
 			if flusher != nil {
 				sendSSE(w, flusher, SSEChunk{
@@ -895,9 +894,13 @@ func handleStream(w http.ResponseWriter, r *http.Request, req ChatRequest, model
 			first = false
 		}
 		if flusher != nil {
+			field := "content"
+			if sc.Kind == "reasoning" {
+				field = "reasoning_content"
+			}
 			sendSSE(w, flusher, SSEChunk{
 				ID: id, Object: "chat.completion.chunk", Created: created, Model: req.Model,
-				Choices: []SSEChoice{{Index: 0, Delta: json.RawMessage(`{"content":` + mustQuote(text) + `}`)}},
+				Choices: []SSEChoice{{Index: 0, Delta: json.RawMessage(`{"` + field + `":` + mustQuote(sc.Text) + `}`)}},
 			})
 		}
 	}, req.Tools, req.ThinkingEffort, req.ContextWindow, r.RemoteAddr, apikey)
@@ -1209,7 +1212,7 @@ comboRounds:
 			log.Printf("combo %q: round %d, trying qd/%s", comboName, round+1, modelKey)
 
 			first := true
-			result, err := runWithPATRotation(r.Context(), patPool, modelKey, req.Messages, req.MaxTokens, func(text string) {
+			result, err := runWithPATRotation(r.Context(), patPool, modelKey, req.Messages, req.MaxTokens, func(sc StreamChunk) {
 				if first {
 					if flusher != nil && !roleSent {
 						sendSSE(w, flusher, SSEChunk{
@@ -1221,9 +1224,13 @@ comboRounds:
 					first = false
 				}
 				if flusher != nil {
+					field := "content"
+					if sc.Kind == "reasoning" {
+						field = "reasoning_content"
+					}
 					sendSSE(w, flusher, SSEChunk{
 						ID: id, Object: "chat.completion.chunk", Created: created, Model: comboName,
-						Choices: []SSEChoice{{Index: 0, Delta: json.RawMessage(`{"content":` + mustQuote(text) + `}`)}},
+						Choices: []SSEChoice{{Index: 0, Delta: json.RawMessage(`{"` + field + `":` + mustQuote(sc.Text) + `}`)}},
 					})
 				}
 			}, req.Tools, req.ThinkingEffort, req.ContextWindow, r.RemoteAddr, apikey)
@@ -1594,9 +1601,9 @@ func runWithPATRotation(ctx context.Context, pool *PATPool, modelKey string, mes
 		emitted := false
 		callback := onChunk
 		if onChunk != nil {
-			callback = func(text string) {
+			callback = func(sc StreamChunk) {
 				emitted = true
-				onChunk(text)
+				onChunk(sc)
 			}
 		}
 		result, lastErr = callQoder(ctx, pat, modelKey, messages, maxTokens, callback, tools, thinkingEffort, contextWindow)
@@ -1781,6 +1788,9 @@ func isQueueError(err error) bool {
 // Plain 401 is NOT retryable — the credential is bad, not exhausted.
 // Other PATs can't recover an expired/invalid token.
 func isRetryableError(err error) bool {
+	if errors.Is(err, errModelNotInList) {
+		return false // unknown model: rotating PATs won't help
+	}
 	var ue *UpstreamError
 	if errors.As(err, &ue) {
 		if ue.StatusCode == 401 {
@@ -1970,6 +1980,21 @@ func recoverPanic(w http.ResponseWriter, flusher http.Flusher, id string, create
 // forwardUpstreamError forwards the raw Qoder API error to the client,
 // preserving the upstream status code and body for debugging.
 func forwardUpstreamError(w http.ResponseWriter, err error) {
+	if errors.Is(err, errModelNotInList) {
+		keys := make([]string, 0, len(frontierModels))
+		for k := range frontierModels {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(400)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": map[string]interface{}{
+				"message": fmt.Sprintf("%s — Qoder silently downgrades unknown model keys to the default model, so this request is rejected. Valid keys: qd/%s", err.Error(), strings.Join(keys, ", qd/")),
+			},
+		})
+		return
+	}
 	var ue *UpstreamError
 	if errors.As(err, &ue) {
 		w.Header().Set("Content-Type", "application/json")

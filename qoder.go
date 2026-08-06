@@ -11,6 +11,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -33,6 +34,11 @@ const (
 )
 
 // ── Credential cache ────────────────────────────────────────────────────────
+
+// errModelNotInList means the requested key is absent from Qoder's live
+// model list. Sending it upstream would silently downgrade to the default
+// model, so the bridge fails fast with 400 instead.
+var errModelNotInList = errors.New("model not in upstream model list")
 
 // UpstreamError carries the raw Qoder API error for forwarding to clients.
 type UpstreamError struct {
@@ -203,7 +209,7 @@ func getModelConfig(cred *patCredential, modelKey string) (*modelConfig, error) 
 		if ok {
 			return mc, nil
 		}
-		return nil, fmt.Errorf("model %q not found in model list (%d models)", modelKey, len(modelConfigCache))
+		return nil, fmt.Errorf("%w: model %q not in model list (%d models)", errModelNotInList, modelKey, len(modelConfigCache))
 	}
 	modelConfigCacheMu.RUnlock()
 
@@ -220,7 +226,7 @@ func getModelConfig(cred *patCredential, modelKey string) (*modelConfig, error) 
 			if ok {
 				return mc, nil
 			}
-			return nil, fmt.Errorf("model %q not found in model list (%d models)", modelKey, len(modelConfigCache))
+			return nil, fmt.Errorf("%w: model %q not in model list (%d models)", errModelNotInList, modelKey, len(modelConfigCache))
 		}
 		modelConfigCacheMu.RUnlock()
 		// Cache still stale — fall through to fetch ourselves.
@@ -262,14 +268,20 @@ func allCachedModelConfigs() []*modelConfig {
 	return out
 }
 
-// ensureModelConfig returns cached config or fetches it. If fetch fails,
-// returns a minimal fallback config so requests don't hard-fail.
-func ensureModelConfig(cred *patCredential, modelKey string) *modelConfig {
+// ensureModelConfig returns cached config or fetches it. If the key is
+// absent from the live model list it returns errModelNotInList — the
+// upstream would otherwise silently downgrade to the default model.
+// Transient fetch failures still return a minimal fallback config so
+// requests don't hard-fail when the list endpoint is flaky.
+func ensureModelConfig(cred *patCredential, modelKey string) (*modelConfig, error) {
 	if mc := getCachedModelConfig(modelKey); mc != nil {
-		return mc
+		return mc, nil
 	}
 	mc, err := getModelConfig(cred, modelKey)
 	if err != nil {
+		if errors.Is(err, errModelNotInList) {
+			return nil, err
+		}
 		log.Printf("warn: model config for %q not available: %v — using fallback", modelKey, err)
 		return &modelConfig{
 			Key:             modelKey,
@@ -277,9 +289,9 @@ func ensureModelConfig(cred *patCredential, modelKey string) *modelConfig {
 			MaxOutputTokens: 32768,
 			Source:          "",
 			Raw:             nil,
-		}
+		}, nil
 	}
-	return mc
+	return mc, nil
 }
 
 func fetchModelConfig(cred *patCredential, modelKey string, retry bool) (*modelConfig, error) {
@@ -387,7 +399,7 @@ func fetchModelConfig(cred *patCredential, modelKey string, retry bool) (*modelC
 		return mc, nil
 	}
 
-	return nil, fmt.Errorf("model %q not found in model list (%d models)", modelKey, len(newCache))
+	return nil, fmt.Errorf("%w: model %q not in model list (%d models)", errModelNotInList, modelKey, len(newCache))
 }
 
 // ── Quota ───────────────────────────────────────────────────────────────────
@@ -1146,7 +1158,10 @@ func generateCallID() string {
 
 // buildQoderRequestBody creates the exact JSON payload Qoder expects.
 func buildQoderRequestBody(modelKey string, messages []ChatMessage, maxTokens int, creds *patCredential, tools []ToolDef, thinkingEffort string, contextWindow int) ([]byte, error) {
-	mc := ensureModelConfig(creds, modelKey)
+	mc, err := ensureModelConfig(creds, modelKey)
+	if err != nil {
+		return nil, err
+	}
 
 	normalized, systemText := normalizeMessages(messages, tools)
 	lastUser := lastUserText(messages)
@@ -1261,8 +1276,14 @@ func toolsPayload(tools []ToolDef) []interface{} {
 	return out
 }
 
-// StreamCallback is called for each text chunk during streaming.
-type StreamCallback func(text string)
+// StreamChunk is one streamed piece. Kind is "text" or "reasoning".
+type StreamChunk struct {
+	Kind string
+	Text string
+}
+
+// StreamCallback is called for each chunk during streaming.
+type StreamCallback func(StreamChunk)
 
 // callQoder sends a chat completion request directly to Qoder's API with
 // full COSY signing and WAF encoding. No qodercli required.
@@ -1360,11 +1381,11 @@ func callQoder(ctx context.Context, pat, modelKey string, messages []ChatMessage
 	tFirstChunk := time.Time{}
 	wrappedChunk := onChunk
 	if onChunk != nil {
-		wrappedChunk = func(text string) {
+		wrappedChunk = func(sc StreamChunk) {
 			if tFirstChunk.IsZero() {
 				tFirstChunk = time.Now()
 			}
-			onChunk(text)
+			onChunk(sc)
 		}
 	}
 	text, nativeToolCalls, err := unwrapQoderSSE(resp.Body, wrappedChunk)
@@ -1586,12 +1607,14 @@ func unwrapQoderSSE(body io.Reader, onChunk StreamCallback) (string, []map[strin
 		var chunk struct {
 			Choices []struct {
 				Delta struct {
-					Content   string                   `json:"content"`
-					ToolCalls []map[string]interface{} `json:"tool_calls"`
+					Content          string                   `json:"content"`
+					ReasoningContent string                   `json:"reasoning_content"`
+					ToolCalls        []map[string]interface{} `json:"tool_calls"`
 				} `json:"delta"`
 				Message struct {
-					Content   string                   `json:"content"`
-					ToolCalls []map[string]interface{} `json:"tool_calls"`
+					Content          string                   `json:"content"`
+					ReasoningContent string                   `json:"reasoning_content"`
+					ToolCalls        []map[string]interface{} `json:"tool_calls"`
 				} `json:"message"`
 			} `json:"choices"`
 		}
@@ -1600,9 +1623,13 @@ func unwrapQoderSSE(body io.Reader, onChunk StreamCallback) (string, []map[strin
 		}
 		for _, ch := range chunk.Choices {
 			text := ch.Delta.Content
+			reasoning := ch.Delta.ReasoningContent
 			tc := ch.Delta.ToolCalls
 			if text == "" {
 				text = ch.Message.Content
+			}
+			if reasoning == "" {
+				reasoning = ch.Message.ReasoningContent
 			}
 			if len(tc) == 0 {
 				tc = ch.Message.ToolCalls
@@ -1610,10 +1637,13 @@ func unwrapQoderSSE(body io.Reader, onChunk StreamCallback) (string, []map[strin
 			if len(tc) > 0 {
 				toolCalls = append(toolCalls, tc...)
 			}
+			if reasoning != "" && onChunk != nil {
+				onChunk(StreamChunk{Kind: "reasoning", Text: reasoning})
+			}
 			if text != "" {
 				full.WriteString(text)
 				if onChunk != nil {
-					onChunk(text)
+					onChunk(StreamChunk{Kind: "text", Text: text})
 				}
 			}
 		}

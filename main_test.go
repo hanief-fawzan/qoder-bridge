@@ -192,8 +192,8 @@ func TestUnwrapQoderSSEEnvelopeError(t *testing.T) {
 func TestUnwrapQoderSSEWithCallback(t *testing.T) {
 	input := "data: {\"statusCodeValue\":200,\"body\":\"{\\\"choices\\\":[{\\\"delta\\\":{\\\"content\\\":\\\"chunk1\\\"}}]}\"}\ndata: {\"statusCodeValue\":200,\"body\":\"{\\\"choices\\\":[{\\\"delta\\\":{\\\"content\\\":\\\"chunk2\\\"}}]}\"}\ndata: [DONE]\n"
 	var chunks []string
-	text, _, err := unwrapQoderSSE(strings.NewReader(input), func(s string) {
-		chunks = append(chunks, s)
+	text, _, err := unwrapQoderSSE(strings.NewReader(input), func(sc StreamChunk) {
+		chunks = append(chunks, sc.Text)
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -203,6 +203,35 @@ func TestUnwrapQoderSSEWithCallback(t *testing.T) {
 	}
 	if len(chunks) != 2 {
 		t.Errorf("callback: expected 2 calls, got %d", len(chunks))
+	}
+}
+
+func TestUnwrapQoderSSEReasoningContent(t *testing.T) {
+	// reasoning_content deltas must be surfaced as kind="reasoning" and NOT
+	// appended to the final answer text.
+	input := "data: {\"statusCodeValue\":200,\"body\":\"{\\\"choices\\\":[{\\\"delta\\\":{\\\"reasoning_content\\\":\\\"think1\\\"}}]}\"}\n" +
+		"data: {\"statusCodeValue\":200,\"body\":\"{\\\"choices\\\":[{\\\"delta\\\":{\\\"reasoning_content\\\":\\\"think2\\\"}}]}\"}\n" +
+		"data: {\"statusCodeValue\":200,\"body\":\"{\\\"choices\\\":[{\\\"delta\\\":{\\\"content\\\":\\\"answer\\\"}}]}\"}\n" +
+		"data: [DONE]\n"
+	var kinds, texts []string
+	text, _, err := unwrapQoderSSE(strings.NewReader(input), func(sc StreamChunk) {
+		kinds = append(kinds, sc.Kind)
+		texts = append(texts, sc.Text)
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if text != "answer" {
+		t.Errorf("text must exclude reasoning: got %q", text)
+	}
+	if len(kinds) != 3 {
+		t.Fatalf("expected 3 chunks, got %d: %v", len(kinds), kinds)
+	}
+	if kinds[0] != "reasoning" || kinds[1] != "reasoning" || kinds[2] != "text" {
+		t.Errorf("kinds: got %v", kinds)
+	}
+	if texts[0] != "think1" || texts[1] != "think2" || texts[2] != "answer" {
+		t.Errorf("texts: got %v", texts)
 	}
 }
 
